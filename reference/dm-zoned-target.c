@@ -694,20 +694,21 @@ static int dmz_get_zoned_device(struct dm_target *ti, char *path,
 				int idx, int nr_devs)
 {
 	struct dmz_target *dmz = ti->private;
-	struct dm_dev *ddev;
+
 	struct dmz_dev *dev;
 	int ret;
-	struct block_device *bdev;
 
+	struct block_device *bdev;
+    struct dm_dev *ddev;
 	/* Get the target device */
 	ret = dm_get_device(ti, path, dm_table_get_mode(ti->table), &ddev);
 	if (ret) {
 		ti->error = "Get target device failed";
 		return ret;
 	}
-
 	bdev = ddev->bdev;
-	if (bdev_zoned_model(bdev) == BLK_ZONED_NONE) {
+
+    if (bdev_zoned_model(bdev) == BLK_ZONED_NONE) {
 		if (nr_devs == 1) {
 			ti->error = "Invalid regular device";
 			goto err;

@@ -1,2 +1,1 @@
-cp $(pwd)/$(ls -a | grep dm-zoned) ./drivers/md/
-
+sshpass -p femu rsync -avz -e "ssh -p 8080" /home/log/Desktop/dm-LZFTL/$(ls) femu@localhost:/tmp/dm-zoned
