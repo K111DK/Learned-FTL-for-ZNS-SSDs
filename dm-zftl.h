@@ -17,8 +17,10 @@
 #include <linux/rbtree.h>
 #include <linux/radix-tree.h>
 #include <linux/shrinker.h>
-
-
+#define DM_ZFTL_NO_MAPPING_TEST 1
+#define DM_ZFTL_DEBUG 0
+#define DM_ZFTL_DEBUG_WRITE 1
+#define DM_ZFTL_MIN_BIOS 8192
 #define BDEVNAME_SIZE 256
 /*
  * Creates block devices with 4KB blocks, always.
@@ -44,11 +46,34 @@
 
 #define dmz_bio_block(bio)	dmz_sect2blk((bio)->bi_iter.bi_sector)
 #define dmz_bio_blocks(bio)	dmz_sect2blk(bio_sectors(bio))
+enum {
+    DMZAP_WR_OUTSTANDING,
+};
+
+
+struct dm_zftl_mapping_table{
+    unsigned int l2p_table_sz;
+    sector_t * l2p_table;
+};
+
+
+struct dm_zftl_io_work{
+    struct work_struct	work;
+    struct bio * bio_ctx;
+    struct dm_zftl_target * target;
+    refcount_t		ref;
+    sector_t		user_sec;
+};
 
 struct dm_zftl_target {
+    /* For cloned BIOs to conventional zones */
+    struct bio_set		bio_set;
+    unsigned long		write_bitmap;
+    struct dm_zftl_mapping_table *mapping_table;
     struct zoned_dev *cache_device;
     struct zoned_dev *zone_device;
     sector_t capacity_nr_sectors;
+    struct workqueue_struct *io_wq;
 };
 
 struct zoned_dev {
@@ -75,6 +100,7 @@ struct dev_metadata {
     struct list_head free_zoned;
     atomic_t nr_full_zone;
     struct list_head full_zoned;
+    struct zone_info * opened_zoned;
 };
 
 struct zone_link_entry {
@@ -91,8 +117,10 @@ struct zone_info {
     atomic_t		refcount;
     /* Zone id */
     unsigned int		id;
-    /* Zone write pointer block (relative to the zone start block) */
-    unsigned int		wp_block;
+    /* Zone write pointer sector (relative to the zone start block) */
+    unsigned int		wp;
+
+    spinlock_t * lock_;
 };
 
 /*
