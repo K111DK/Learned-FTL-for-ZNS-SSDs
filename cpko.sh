@@ -1,0 +1,1 @@
+rsync -avz -e "ssh -p 8080" femu@localhost:/tmp/dm-zoned/dm-zftl.ko ./

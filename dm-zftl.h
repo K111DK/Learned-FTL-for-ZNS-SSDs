@@ -17,9 +17,13 @@
 #include <linux/rbtree.h>
 #include <linux/radix-tree.h>
 #include <linux/shrinker.h>
-#define DM_ZFTL_NO_MAPPING_TEST 1
+
+
+#define DM_REMAPPED 1
+#define DM_ZFTL_MAPPING_DEBUG 0
+#define DM_ZFTL_NO_MAPPING_TEST 0
 #define DM_ZFTL_DEBUG 0
-#define DM_ZFTL_DEBUG_WRITE 1
+#define DM_ZFTL_DEBUG_WRITE 0
 #define DM_ZFTL_MIN_BIOS 8192
 #define BDEVNAME_SIZE 256
 /*
@@ -46,15 +50,27 @@
 
 #define dmz_bio_block(bio)	dmz_sect2blk((bio)->bi_iter.bi_sector)
 #define dmz_bio_blocks(bio)	dmz_sect2blk(bio_sectors(bio))
+#define DM_ZFTL_ZONED_DEV_CAP_RATIO 0.8
+
+
+
 enum {
     DMZAP_WR_OUTSTANDING,
 };
 
 
 struct dm_zftl_mapping_table{
-    unsigned int l2p_table_sz;
-    sector_t * l2p_table;
+    unsigned int l2p_table_sz; // in blocks
+    uint32_t * l2p_table; // all unmapped lba will be mapped to 0 (which is metadata zoned)
+    uint8_t * device_bitmap; // 0-> cache 1-> backedend 1B -> 4*8 = 32KB: 32MB/TB
+    struct mutex l2p_lock;
 };
+
+
+//int dm_zftl_init_mapping_table(struct dm_zftl_target * dm_zftl);
+//sector_t dm_zftl_get(struct dm_zftl_mapping_table * mapping_table, sector_t lba);
+//int dm_zftl_set(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa);
+//int dm_zftl_update_mapping(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, unsigned int nr_blocks);
 
 
 struct dm_zftl_io_work{
@@ -65,21 +81,23 @@ struct dm_zftl_io_work{
     sector_t		user_sec;
 };
 
+
 struct dm_zftl_target {
     /* For cloned BIOs to conventional zones */
     struct bio_set		bio_set;
-    unsigned long		write_bitmap;
     struct dm_zftl_mapping_table *mapping_table;
     struct zoned_dev *cache_device;
     struct zoned_dev *zone_device;
     sector_t capacity_nr_sectors;
     struct workqueue_struct *io_wq;
+    struct dm_io_client *io_client; /* Client memory pool*/
 };
 
 struct zoned_dev {
 
     struct block_device	*bdev;
     struct dev_metadata *zoned_metadata;
+    unsigned long		write_bitmap;
 
     char			name[BDEVNAME_SIZE];
     uuid_t			uuid;
@@ -101,6 +119,7 @@ struct dev_metadata {
     atomic_t nr_full_zone;
     struct list_head full_zoned;
     struct zone_info * opened_zoned;
+    spinlock_t lock_;
 };
 
 struct zone_link_entry {
@@ -119,8 +138,7 @@ struct zone_info {
     unsigned int		id;
     /* Zone write pointer sector (relative to the zone start block) */
     unsigned int		wp;
-
-    spinlock_t * lock_;
+    spinlock_t lock_;
 };
 
 /*
@@ -132,4 +150,10 @@ enum {
     DMZ_READ_ONLY,
 };
 
+sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, struct bio * bio);
+int dm_zftl_open_new_zone(struct zoned_dev * dev);
+int dm_zftl_reset_all(struct zoned_dev * dev);
+int dm_zftl_reset_zone(struct zoned_dev * dev, struct zone_info *zone);
+void dm_zftl_zone_close(struct zoned_dev * dev, unsigned int zone_id);
+int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio);
 #endif //DM_ZFTL_DM_ZFTL_H

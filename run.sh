@@ -18,8 +18,9 @@ seq_write_test(){
 }
 
 compile_install(){
-  rmmod dm-zftl-target.ko
-  insmod dm-zftl-target.ko
+  dmsetup remove_all
+  rmmod dm-zftl.ko
+  insmod dm-zftl.ko
 }
 
 switch_dir(){
