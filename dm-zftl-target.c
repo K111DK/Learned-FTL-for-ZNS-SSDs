@@ -95,20 +95,20 @@ sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, struct bio * bio){
 }
 
 
-//*
-// * Initialize the bio context
-// */
-//static inline void dm_zftl_init_bioctx(struct dm_zftl_target *dm_zftl,
-//                                     struct bio *bio)
-//{
-//    struct dm_zftl_io_work *bioctx = dm_per_bio_data(bio, sizeof(struct dm_zftl_io_work));
-//    bioctx->target = dm_zftl;
-//    bioctx->user_sec = bio->bi_iter.bi_sector;
-//    bioctx->bio_ctx = bio;
-//    refcount_set(&bioctx->ref, 1);
-//}
+/*
+ * Initialize the bio context
+ */
+static inline void dm_zftl_init_bioctx(struct dm_zftl_target *dm_zftl,
+                                     struct bio *bio)
+{
+    struct dm_zftl_io_work *bioctx = dm_per_bio_data(bio, sizeof(struct dm_zftl_io_work));
+    bioctx->target = dm_zftl;
+    bioctx->user_sec = bio->bi_iter.bi_sector;
+    bioctx->bio_ctx = bio;
+    refcount_set(&bioctx->ref, 1);
+}
 
-///*
+//*
 // * Target BIO completion.
 // */
 //inline void dm_zftl_bio_endio(struct bio *bio, blk_status_t status)
@@ -124,32 +124,25 @@ sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, struct bio * bio){
 
 
 
-///*
-// * Completion callback for an internally cloned target BIO. This terminates the
-// * target BIO when there are no more references to its context.
-// */
-//static void dm_zftl_clone_endio(struct bio *bio)
-//{
-//    struct dm_zftl_io_work *bioctx = bio->bi_private;
-//    blk_status_t status = bio->bi_status;
-//
-//    if (status != BLK_STS_OK && bio->bi_status == BLK_STS_OK)
-//        bio->bi_status = status;
-//
-//    if (bio_data_dir(bio) == WRITE) {
-//        struct zone_info * opened_zone = bioctx->target->cache_device->zoned_metadata->opened_zoned;
-//        unsigned int bio_len = bio_sectors(bio);
-//        dm_zftl_update_mapping(bioctx->target->mapping_table,
-//                               bioctx->user_sec,//LPA
-//                               dm_zftl_get_seq_wp(bioctx->target->cache_device, bio),
-//                               dmz_bio_blocks(bio));
-//#if DM_ZFTL_DEBUG_WRITE
-//        printk(KERN_EMERG "Wp update from %llu to %llu", opened_zone->wp, opened_zone->wp + bio_len);
-//#endif
-//        opened_zone->wp += bio_len;
-//    }
-//    bio_endio(bio);
-//}
+/*
+ * Completion callback for an internally cloned target BIO. This terminates the
+ * target BIO when there are no more references to its context.
+ */
+static void dm_zftl_clone_endio(struct bio *clone)
+{
+    struct dm_zftl_io_work *bioctx = clone->bi_private;
+    struct bio * bio = bioctx->bio_ctx;
+    blk_status_t status = clone->bi_status;
+
+    if (status != BLK_STS_OK && bio->bi_status == BLK_STS_OK)
+        bio->bi_status = status;
+
+    if (bio_op(bio) == REQ_OP_WRITE)
+        clear_bit_unlock(DMZAP_WR_OUTSTANDING, &bioctx->target->zone_device->write_bitmap);
+
+    //bio_put(clone);
+    bio_endio(bio);
+}
 
 //*
 // * Issue a clone of a target BIO. The clone may only partially process the
@@ -189,6 +182,24 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
     bio_endio(bio);
     return DM_MAPIO_SUBMITTED;
 #endif
+
+
+#if DM_ZFTL_CLONE_BIO_SUBMITTED
+    struct bio *clone;
+	clone = bio_clone_fast(bio, GFP_NOIO, &dm_zftl->bio_set);
+    struct dm_zftl_io_work *bioctx = dm_per_bio_data(bio, sizeof(struct dm_zftl_io_work));
+
+    clone->bi_iter.bi_sector = dm_zftl_get(dm_zftl->mapping_table, bio->bi_iter.bi_sector);
+
+    bio_set_dev(clone, dm_zftl->zone_device->bdev);
+
+    clone->bi_end_io = dm_zftl_clone_endio;
+    clone->bi_iter.bi_size = dmz_blk2sect(dmz_bio_blocks(bio)) << SECTOR_SHIFT;
+    clone->bi_private = bioctx;
+    submit_bio_noacct(clone);
+    return DM_MAPIO_SUBMITTED;
+#endif
+
     unsigned int nr_blocks = dmz_bio_blocks(bio);
     struct dm_io_region * where = kvmalloc_array(nr_blocks,
                                               sizeof(struct dm_io_region), GFP_KERNEL | __GFP_ZERO);
@@ -234,17 +245,39 @@ void dm_zftl_dm_io_write_cb(unsigned long error, void * context){
     struct dm_zftl_io_work * io_work =(struct dm_zftl_io_work *) context;
     struct bio * bio = io_work->bio_ctx;
     struct dm_zftl_target * dm_zftl = io_work->target;
+
 #if DM_ZFTL_MAPPING_DEBUG
     printk(KERN_EMERG "Write call back ");
 #endif
+
     bio_endio(bio);
 //    clear_bit_unlock(DMZAP_WR_OUTSTANDING, &dm_zftl->zone_device->write_bitmap);
 }
 
 int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
-//    while(test_and_set_bit_lock(DMZAP_WR_OUTSTANDING,
-//                                &dm_zftl->zone_device->write_bitmap))
-//        io_schedule();
+#if DM_ZFTL_CLONE_BIO_SUBMITTED
+    while(test_and_set_bit_lock(DMZAP_WR_OUTSTANDING,
+                                &dm_zftl->zone_device->write_bitmap))
+        io_schedule();
+
+    struct bio *clone;
+    clone = bio_clone_fast(bio, GFP_NOIO, &dm_zftl->bio_set);
+    struct dm_zftl_io_work *bioctx = dm_per_bio_data(bio, sizeof(struct dm_zftl_io_work));
+
+    clone->bi_iter.bi_sector = dm_zftl_get_seq_wp(dm_zftl->zone_device, bio);
+    bio_set_dev(clone, dm_zftl->zone_device->bdev);
+    dm_zftl_update_mapping(dm_zftl->mapping_table,
+                           bioctx->user_sec,
+                           dm_zftl_get_seq_wp(dm_zftl->zone_device, bio),
+                           dmz_bio_blocks(bio));
+    dm_zftl->zone_device->zoned_metadata->opened_zoned->wp += dmz_blk2sect(dmz_bio_blocks(bio));
+    clone->bi_iter.bi_size = dmz_blk2sect(dmz_bio_blocks(bio)) << SECTOR_SHIFT;
+    clone->bi_end_io = dm_zftl_clone_endio;
+    clone->bi_private = bioctx;
+    submit_bio_noacct(clone);
+    return DM_MAPIO_SUBMITTED;
+#endif
+
     struct dm_io_region * where = kvmalloc_array(1, sizeof(struct dm_io_region), GFP_KERNEL | __GFP_ZERO);
     int i, ret;
     sector_t start_sec = bio->bi_iter.bi_sector;
@@ -285,8 +318,6 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
     zero_fill_bio(bio);
     bio_endio(bio);
     return DM_MAPIO_SUBMITTED;
-
-
 }
 
 
@@ -399,7 +430,7 @@ int dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
     }
 
     out:
-    return ret;
+    return DM_MAPIO_SUBMITTED;;
 }
 
 /*
@@ -462,7 +493,7 @@ static int dm_zftl_map(struct dm_target *ti, struct bio *bio)
         return DM_MAPIO_KILL;
 
     /* Initialize the BIO context */
-//    dm_zftl_init_bioctx(dm_zftl,bio);
+    dm_zftl_init_bioctx(dm_zftl,bio);
 
 //    /* Set the BIO pending in the flush list */
 //    if (!nr_sectors && bio_op(bio) == REQ_OP_WRITE) {
@@ -733,8 +764,18 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
         goto err_dev;
     }
 
+
+
     /* Set target (no write same support) */
+#if DM_ZFTL_CLONE_BIO_SUBMITTED
     ti->max_io_len = DM_ZFTL_SPLIT_IO_NR_SECTORS;
+#else
+    ti->max_io_len = DM_ZFTL_SPLIT_IO_NR_SECTORS;
+    //ti->max_io_len = dmz->zone_device->zone_nr_sectors;
+#endif
+
+
+
     ti->num_flush_bios = 1;
     ti->num_discard_bios = 1;
     ti->num_write_zeroes_bios = 1;
