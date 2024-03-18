@@ -11,6 +11,21 @@
 #include <linux/bio.h>
 #include <linux/dm-ioctl.h>
 
+int dm_zftl_iterate_devices(struct dm_target *ti,
+                        iterate_devices_callout_fn fn, void *data)
+{
+    struct dm_zftl_target *dm_zftl = ti->private;
+    unsigned int zone_nr_sectors = dm_zftl->zone_device->zone_nr_sectors;
+    sector_t capacity;
+
+    int i, r;
+    capacity = dm_zftl->cache_device->capacity_nr_sectors & ~(zone_nr_sectors - 1);
+    r = fn(ti, dm_zftl->zone_device->dmdev, 0, ti->len, data);
+    printk(KERN_EMERG "Func: %pS at address: %px Return: %d\n", fn, fn, r);
+    return r;
+}
+
+
 int dm_zftl_init_mapping_table(struct dm_zftl_target * dm_zftl){
     dm_zftl->mapping_table = (struct dm_zftl_mapping_table *)vmalloc(sizeof(struct dm_zftl_mapping_table));
     mutex_init(&dm_zftl->mapping_table->l2p_lock);
@@ -64,6 +79,8 @@ int dm_zftl_update_mapping(struct dm_zftl_mapping_table * mapping_table, sector_
 #endif
     return 0;
 }
+
+
 sector_t dm_zftl_get_seq_wp_direct(struct zoned_dev * dev){
     struct zone_info * opened_zone = dev->zoned_metadata->opened_zoned;
     return opened_zone->wp + opened_zone->id * dev->zone_nr_sectors ;
@@ -212,10 +229,10 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
         where[i].bdev = dm_zftl->zone_device->bdev;
         where[i].sector = ppa;
         where[i].count = dmz_blk2sect(1);
-        if(ppa == (sector_t) 0){
-            //printk(KERN_EMERG "Unmapped IO %llu (%llu secs)", start_sec, dmz_bio_blocks(bio) * 8);
-            goto RETURN_ZERO;
-        }
+//        if(ppa == (sector_t) 0){
+//            //printk(KERN_EMERG "Unmapped IO %llu (%llu secs)", start_sec, dmz_bio_blocks(bio) * 8);
+//            goto RETURN_ZERO;
+//        }
     }
 
 #if DM_ZFTL_MAPPING_DEBUG
@@ -489,8 +506,11 @@ static int dm_zftl_map(struct dm_target *ti, struct bio *bio)
 
 
     /* The BIO should be block aligned */
-    if ((nr_sectors & DMZ_BLOCK_SECTORS_MASK) || (sector & DMZ_BLOCK_SECTORS_MASK))
+    if ((nr_sectors & DMZ_BLOCK_SECTORS_MASK) || (sector & DMZ_BLOCK_SECTORS_MASK)){
+        printk(KERN_EMERG "Unaligned bio sector:%llu nr_sectors:%llu",sector , nr_sectors);
         return DM_MAPIO_KILL;
+    }
+
 
     /* Initialize the BIO context */
     dm_zftl_init_bioctx(dm_zftl,bio);
@@ -546,6 +566,7 @@ static int dm_zftl_load_device(struct dm_target *ti, char **argv){
     bdev = ddev->bdev;
     dmz->zone_device->bdev = bdev;
     dmz->zone_device->capacity_nr_sectors = i_size_read(bdev->bd_inode) >> SECTOR_SHIFT;
+    dmz->zone_device->dmdev = ddev;
 
 
     struct request_queue *q;
@@ -572,13 +593,15 @@ static int dm_zftl_load_device(struct dm_target *ti, char **argv){
         ti->error = "Get target device failed";
         return ret;
     }
+    dmz->cache_device->dmdev = ddev;
     bdev = ddev->bdev;
     dmz->cache_device->bdev = bdev;
     dmz->cache_device->capacity_nr_sectors = i_size_read(bdev->bd_inode) >> SECTOR_SHIFT;
     dmz->cache_device->zone_nr_sectors = zone_nr_sectors;
     dmz->cache_device->zone_nr_blocks = dmz_sect2blk(zone_nr_sectors);
     dmz->cache_device->nr_zones = dmz->cache_device->capacity_nr_sectors / dmz->cache_device->zone_nr_sectors;
-    dmz->capacity_nr_sectors = dmz->zone_device->nr_zones * zone_nr_sectors;
+
+    dmz->capacity_nr_sectors = dmz->zone_device->capacity_nr_sectors;
 
 
 #if DM_ZFTL_DEBUG
@@ -645,7 +668,7 @@ static int dm_zftl_geometry_init(struct dm_target *ti)
     INIT_LIST_HEAD(&cache_device_metadata->full_zoned);
     INIT_LIST_HEAD(&cache_device_metadata->open_zoned);
     //TODO: first zone of cache device is metadata zone, which is't vaild for mapping
-    for(i = 1; i < zftl->cache_device->nr_zones; ++i){
+    for(i = 0; i < zftl->cache_device->nr_zones; ++i){
         cache_device_metadata->zones[i].dev = zftl->cache_device;
         atomic_set(&cache_device_metadata->zones[i].refcount, 0);
         cache_device_metadata->zones[i].wp = 0;
@@ -668,6 +691,7 @@ static int dm_zftl_geometry_init(struct dm_target *ti)
 static void dm_zftl_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
     struct dm_zftl_target *dm_zftl = ti->private;
+    unsigned int zone_sectors = dm_zftl->zone_device->zone_nr_sectors;
 
     limits->logical_block_size = DMZ_BLOCK_SIZE;
     limits->physical_block_size = DMZ_BLOCK_SIZE;
@@ -677,16 +701,17 @@ static void dm_zftl_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
     limits->discard_alignment = DMZ_BLOCK_SIZE;
     limits->discard_granularity = DMZ_BLOCK_SIZE;
-    limits->max_discard_sectors = dm_zftl->zone_device->zone_nr_sectors;
-    limits->max_hw_discard_sectors = dm_zftl->zone_device->zone_nr_sectors;
-    limits->max_write_zeroes_sectors = dm_zftl->zone_device->zone_nr_sectors;
+
+    limits->max_discard_sectors = zone_sectors;
+    limits->max_hw_discard_sectors = zone_sectors;
+    limits->max_write_zeroes_sectors = zone_sectors;
 
     /* FS hint to try to align to the device zone size */
-    limits->chunk_sectors = dm_zftl->zone_device->zone_nr_sectors;
-    limits->max_sectors = dm_zftl->zone_device->zone_nr_sectors;
+    limits->chunk_sectors = zone_sectors;
+    limits->max_sectors = zone_sectors;
 
     /* We are exposing a drive-managed zoned block device */
-    limits->zoned = BLK_ZONED_NONE;
+    limits->zoned = BLK_ZONED_HM;
 }
 
 void dm_zftl_mapping_table_test(struct dm_zftl_target *dm_zftl){
@@ -766,16 +791,16 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 
 
-    /* Set target (no write same support) */
-#if DM_ZFTL_CLONE_BIO_SUBMITTED
-    ti->max_io_len = DM_ZFTL_SPLIT_IO_NR_SECTORS;
-#else
-    ti->max_io_len = DM_ZFTL_SPLIT_IO_NR_SECTORS;
-    //ti->max_io_len = dmz->zone_device->zone_nr_sectors;
-#endif
+//    /* Set target (no write same support) */
+//#if DM_ZFTL_CLONE_BIO_SUBMITTED
+//    ti->max_io_len = DM_ZFTL_SPLIT_IO_NR_SECTORS;
+//#else
+//    ti->max_io_len = DM_ZFTL_SPLIT_IO_NR_SECTORS;
+//    //
+//#endif
 
 
-
+    ti->max_io_len = 8;
     ti->num_flush_bios = 1;
     ti->num_discard_bios = 1;
     ti->num_write_zeroes_bios = 1;
@@ -797,17 +822,28 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     return -1;
 }
 
-
+/*
+ * Pass on ioctl to the backend device.
+ */
+static int dm_zftl_prepare_ioctl(struct dm_target *ti, struct block_device **bdev)
+{
+    struct dm_zftl_target * dm_zftl = ti->private;
+    *bdev = dm_zftl->zone_device->bdev;
+    return 0;
+}
 
 static struct target_type dm_zftl_type = {
         .name		 = "zftl",
         .version	 = {1, 0, 0},
-        .features	 = DM_TARGET_SINGLETON | DM_TARGET_MIXED_ZONED_MODEL,
+        .features	 = DM_TARGET_ZONED_HM,
         .module		 = THIS_MODULE,
         .ctr		 = dm_zftl_ctr,
         .dtr		 = dm_zftl_dtr,
         .map		 = dm_zftl_map,
         .io_hints	 = dm_zftl_io_hints,
+        .prepare_ioctl	 = dm_zftl_prepare_ioctl,
+        .iterate_devices = dm_zftl_iterate_devices,
+
 
 };
 
@@ -838,7 +874,7 @@ static void __exit dm_zftl_exit(void)
 //    } else {
 //        int ret;
 //
-////TODO: mapping update
+//TODO: mapping update
 //
 //        dm_zftl_update_seq_wp(dm_zftl, bio_sectors(bio));
 //    }

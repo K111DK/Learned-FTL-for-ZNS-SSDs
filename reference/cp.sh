@@ -1,0 +1,1 @@
+sshpass -p femu rsync -avz -e "ssh -p 8080" /home/log/Desktop/dm-LZFTL/reference/$(ls) femu@localhost:/tmp/

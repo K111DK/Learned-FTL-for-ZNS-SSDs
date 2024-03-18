@@ -19,13 +19,13 @@
 #include <linux/shrinker.h>
 
 
-#define DM_ZFTL_CLONE_BIO_SUBMITTED 1
+#define DM_ZFTL_CLONE_BIO_SUBMITTED 0
 #define DM_ZFTL_SPLIT_IO_NR_SECTORS 8
 #define DM_REMAPPED 1
-#define DM_ZFTL_MAPPING_DEBUG 0
+#define DM_ZFTL_MAPPING_DEBUG 1
 #define DM_ZFTL_NO_MAPPING_TEST 0
-#define DM_ZFTL_DEBUG 0
-#define DM_ZFTL_DEBUG_WRITE 0
+#define DM_ZFTL_DEBUG 1
+#define DM_ZFTL_DEBUG_WRITE 1
 #define DM_ZFTL_MIN_BIOS 8192
 #define BDEVNAME_SIZE 256
 /*
@@ -98,6 +98,7 @@ struct dm_zftl_target {
 struct zoned_dev {
 
     struct block_device	*bdev;
+    struct dm_dev * dmdev;
     struct dev_metadata *zoned_metadata;
     unsigned long		write_bitmap;
 
