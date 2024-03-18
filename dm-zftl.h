@@ -18,7 +18,7 @@
 #include <linux/radix-tree.h>
 #include <linux/shrinker.h>
 
-
+#define DM_ZFTL_SPLIT_IO_NR_SECTORS 8
 #define DM_REMAPPED 1
 #define DM_ZFTL_MAPPING_DEBUG 0
 #define DM_ZFTL_NO_MAPPING_TEST 0

@@ -734,13 +734,13 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     }
 
     /* Set target (no write same support) */
-    ti->max_io_len = DMZ_BLOCK_SIZE;
+    ti->max_io_len = DM_ZFTL_SPLIT_IO_NR_SECTORS;
     ti->num_flush_bios = 1;
     ti->num_discard_bios = 1;
     ti->num_write_zeroes_bios = 1;
     ti->per_io_data_size = sizeof(struct dm_zftl_io_work);
     ti->flush_supported = true;
-    ti->discards_supported = true;
+    ti->discards_supported = false;
     /* The exposed capacity is the number of chunks that can be mapped */
     ti->len = dmz->capacity_nr_sectors;
 
