@@ -272,6 +272,7 @@ void dm_zftl_dm_io_write_cb(unsigned long error, void * context){
 }
 
 int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
+
 #if DM_ZFTL_CLONE_BIO_SUBMITTED
     while(test_and_set_bit_lock(DMZAP_WR_OUTSTANDING,
                                 &dm_zftl->zone_device->write_bitmap))
@@ -322,13 +323,16 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
     iorq.bi_op_flags = REQ_SYNC;
     iorq.mem.type = DM_IO_BIO;
     iorq.mem.ptr.bio = bio;
-    iorq.notify.fn = dm_zftl_dm_io_write_cb;
+    iorq.notify.fn = NULL;
     iorq.notify.context = context;
     iorq.client = dm_zftl->io_client;
 
     dm_zftl->zone_device->zoned_metadata->opened_zoned->wp += dmz_blk2sect(dmz_bio_blocks(bio));
 
-    return dm_io(&iorq, 1, where, NULL);
+    //return dm_io(&iorq, 1, where, NULL);
+    dm_io(&iorq, 1, where, NULL);
+    bio_endio(bio);
+    return DM_MAPIO_SUBMITTED;
 
 
     RETURN_ZERO:
@@ -431,14 +435,21 @@ int dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
             mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
             break;
         case REQ_OP_WRITE:
+
             mutex_lock(&dm_zftl->mapping_table->l2p_lock);
             ret = dm_zftl_dm_io_write(dm_zftl, bio);
             mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
+
             break;
         case REQ_OP_DISCARD:
+            printk(KERN_EMERG "Write zero triggered");
+            ret = DM_MAPIO_SUBMITTED;
+            bio_endio(bio);
+            break;
         case REQ_OP_WRITE_ZEROES:
             printk(KERN_EMERG "Discard operation triggered");
             ret = DM_MAPIO_SUBMITTED;
+            bio_endio(bio);
             break;
         default:
             printk(KERN_EMERG "Ignoring unsupported BIO operation 0x%x",
@@ -499,6 +510,7 @@ static int dm_zftl_map(struct dm_target *ti, struct bio *bio)
             (unsigned long long)(sector + nr_sectors),
             (unsigned long long)dmz_bio_block(bio),
             (unsigned long long)dmz_bio_blocks(bio) + dmz_bio_block(bio));
+
 #endif
 
     if (!nr_sectors && bio_op(bio) != REQ_OP_WRITE)
@@ -790,7 +802,6 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     }
 
 
-
 //    /* Set target (no write same support) */
 //#if DM_ZFTL_CLONE_BIO_SUBMITTED
 //    ti->max_io_len = DM_ZFTL_SPLIT_IO_NR_SECTORS;
@@ -799,8 +810,7 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 //    //
 //#endif
 
-
-    ti->max_io_len = 8;
+    ti->max_io_len = dmz->zone_device->zone_nr_sectors;
     ti->num_flush_bios = 1;
     ti->num_discard_bios = 1;
     ti->num_write_zeroes_bios = 1;

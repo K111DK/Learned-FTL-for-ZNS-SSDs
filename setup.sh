@@ -1,0 +1,2 @@
+make
+bash ./run.sh
