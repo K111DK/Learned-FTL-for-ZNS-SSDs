@@ -36,15 +36,10 @@
 #include <linux/jhash.h>
 
 
-#define DM_ZFTL_WRITE_SPLIT 1
+#define DM_ZFTL_READ_SPLIT 1
 #define DM_ZFTL_EXPOSE_TYPE BLK_ZONED_NONE
-#define DM_ZFTL_CLONE_BIO_SUBMITTED 0
-#define DM_ZFTL_SPLIT_IO_NR_SECTORS 8
-#define DM_REMAPPED 1
 #define DM_ZFTL_MAPPING_DEBUG 0
-#define DM_ZFTL_NO_MAPPING_TEST 0
 #define DM_ZFTL_DEBUG 0
-#define DM_ZFTL_DEBUG_WRITE 0
 #define DM_ZFTL_MIN_BIOS 8192
 #define BDEVNAME_SIZE 256
 /*
@@ -73,7 +68,8 @@
 #define dmz_bio_blocks(bio)	dmz_sect2blk(bio_sectors(bio))
 #define DM_ZFTL_ZONED_DEV_CAP_RATIO 0.8
 
-
+#define DM_ZFTL_FOREGROUND_DEV DM_ZFTL_CACHE
+#define DM_ZFTL_BACKGROUND_DEV DM_ZFTL_BACKEND
 
 enum {
     DMZAP_WR_OUTSTANDING,
@@ -92,7 +88,7 @@ struct dm_zftl_mapping_table{
 //sector_t dm_zftl_get(struct dm_zftl_mapping_table * mapping_table, sector_t lba);
 //int dm_zftl_set(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa);
 //int dm_zftl_update_mapping(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, unsigned int nr_blocks);
-#if DM_ZFTL_WRITE_SPLIT
+#if DM_ZFTL_READ_SPLIT
 struct dm_zftl_read_io {
     struct bio * bio;
     unsigned int nr_io;
@@ -122,6 +118,19 @@ struct dm_zftl_target {
     struct workqueue_struct *io_wq;
     struct dm_io_client *io_client; /* Client memory pool*/
 };
+
+
+#define dm_zftl_is_cache(dev) dev->flags == DM_ZFTL_CACHE
+#define dm_zftl_is_zns(dev) dev->flags == DM_ZFTL_BACKEND
+/*
+ * Zone flags.
+ */
+enum {
+    /* Zone critical condition */
+    DM_ZFTL_BACKEND,
+    DM_ZFTL_CACHE,
+};
+
 
 struct zoned_dev {
 
@@ -172,19 +181,13 @@ struct zone_info {
     spinlock_t lock_;
 };
 
-/*
- * Zone flags.
- */
-enum {
-    /* Zone critical condition */
-    DMZ_OFFLINE,
-    DMZ_READ_ONLY,
-};
 
+struct zoned_dev * dm_zftl_get_foregound_io_dev(struct dm_zftl_target * dm_zftl);
 sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, struct bio * bio);
 int dm_zftl_open_new_zone(struct zoned_dev * dev);
 int dm_zftl_reset_all(struct zoned_dev * dev);
 int dm_zftl_reset_zone(struct zoned_dev * dev, struct zone_info *zone);
 void dm_zftl_zone_close(struct zoned_dev * dev, unsigned int zone_id);
 int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio);
+
 #endif //DM_ZFTL_DM_ZFTL_H
