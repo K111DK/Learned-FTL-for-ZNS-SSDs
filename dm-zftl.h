@@ -17,8 +17,27 @@
 #include <linux/rbtree.h>
 #include <linux/radix-tree.h>
 #include <linux/shrinker.h>
+#include <asm/atomic.h>
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/list.h>
+#include <linux/blkdev.h>
+#include <linux/bio.h>
+#include <linux/slab.h>
+#include <linux/hash.h>
+#include <linux/spinlock.h>
+#include <linux/workqueue.h>
+#include <linux/pagemap.h>
+#include <linux/random.h>
+#include <linux/hardirq.h>
+#include <linux/sysctl.h>
+#include <linux/version.h>
+#include <linux/pid.h>
+#include <linux/jhash.h>
 
 
+#define DM_ZFTL_WRITE_SPLIT 1
+#define DM_ZFTL_EXPOSE_TYPE BLK_ZONED_NONE
 #define DM_ZFTL_CLONE_BIO_SUBMITTED 0
 #define DM_ZFTL_SPLIT_IO_NR_SECTORS 8
 #define DM_REMAPPED 1
@@ -73,6 +92,15 @@ struct dm_zftl_mapping_table{
 //sector_t dm_zftl_get(struct dm_zftl_mapping_table * mapping_table, sector_t lba);
 //int dm_zftl_set(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa);
 //int dm_zftl_update_mapping(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, unsigned int nr_blocks);
+#if DM_ZFTL_WRITE_SPLIT
+struct dm_zftl_read_io {
+    struct bio * bio;
+    unsigned int nr_io;
+    unsigned int complete_io;
+    unsigned int flag;
+    spinlock_t lock_;
+};
+#endif
 
 
 struct dm_zftl_io_work{

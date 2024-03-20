@@ -10,6 +10,7 @@
 #include <linux/dm-io.h>
 #include <linux/bio.h>
 #include <linux/dm-ioctl.h>
+#include <linux/spinlock.h>
 
 int dm_zftl_iterate_devices(struct dm_target *ti,
                         iterate_devices_callout_fn fn, void *data)
@@ -21,7 +22,7 @@ int dm_zftl_iterate_devices(struct dm_target *ti,
     int i, r;
     capacity = dm_zftl->cache_device->capacity_nr_sectors & ~(zone_nr_sectors - 1);
     r = fn(ti, dm_zftl->zone_device->dmdev, 0, ti->len, data);
-    printk(KERN_EMERG "Func: %pS at address: %px Return: %d\n", fn, fn, r);
+    //printk(KERN_EMERG "Func: %pS at address: %px Return: %d\n", fn, fn, r);
     return r;
 }
 
@@ -101,7 +102,9 @@ sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, struct bio * bio){
 
     dm_zftl_zone_close(dev, opened_zone->id);
     ret = dm_zftl_open_new_zone(dev);
+#if DM_ZFTL_DEBUG
     printk(KERN_EMERG "Get new zone of wp:%lld", dev->zoned_metadata->opened_zoned->wp);
+#endif
     if(ret){
         printk(KERN_EMERG "Error: can't alloc free zone");
         return -1;
@@ -193,6 +196,22 @@ void dm_zftl_dm_io_read_cb(unsigned long error, void * context){
     bio_endio(bio);
 }
 
+#if DM_ZFTL_WRITE_SPLIT
+void dm_zftl_read_split_cb(unsigned long error, void * context){
+    struct dm_zftl_read_io * read_io = (struct dm_zftl_read_io * )context;
+    unsigned long flags;
+    spin_lock_irqsave(&read_io->lock_, flags);
+
+    read_io->complete_io += 1;
+    if(read_io->complete_io == read_io->nr_io){
+        bio_endio(read_io->bio);
+    }
+
+    spin_unlock_irqrestore(&read_io->lock_, flags);
+}
+#endif
+
+
 int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
 #if DM_ZFTL_NO_MAPPING_TEST
     zero_fill_bio(bio);
@@ -217,6 +236,50 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
     return DM_MAPIO_SUBMITTED;
 #endif
 
+#if DM_ZFTL_WRITE_SPLIT
+
+    //
+    unsigned long flags;
+    unsigned int nr_blocks = dmz_bio_blocks(bio);
+    struct dm_io_region * where = kvmalloc_array(nr_blocks,
+                                              sizeof(struct dm_io_region), GFP_KERNEL | __GFP_ZERO);
+    int i, ret;
+    sector_t start_sec = bio->bi_iter.bi_sector;
+    sector_t ppa;
+    sector_t original_ppa = dm_zftl_get(dm_zftl->mapping_table, start_sec);
+
+    struct dm_zftl_read_io * read_io = (struct dm_zftl_read_io *)vmalloc(sizeof( struct dm_zftl_read_io));
+    read_io->bio = bio;
+    read_io->nr_io = nr_blocks;
+    read_io->complete_io = 0;
+    spin_lock_init(&read_io->lock_);
+
+    for(i = 0; i < nr_blocks; ++i){
+        ppa = dm_zftl_get(dm_zftl->mapping_table, start_sec + dmz_blk2sect(i));
+        where[i].bdev = dm_zftl->cache_device->bdev;
+        where[i].sector = ppa;
+        where[i].count = dmz_blk2sect(1);
+
+        struct dm_io_request iorq;
+        iorq.bi_op = REQ_OP_READ;
+        iorq.bi_op_flags = 0;
+        iorq.mem.type = DM_IO_BIO;
+        iorq.mem.ptr.bio = bio;
+        //iorq.notify.fn = dm_zftl_read_split_cb;
+        iorq.notify.fn = NULL;
+        iorq.notify.context = read_io;
+        iorq.client = dm_zftl->io_client;
+
+        //spin_lock_irqsave(&read_io->lock_, read_io->flag);
+
+        dm_io(&iorq, 1, &where[i], NULL);
+        bio_advance(bio, 1 << DMZ_BLOCK_SHIFT);
+
+        //spin_unlock_irqrestore(&read_io->lock_, read_io->flag);
+    }
+    bio_endio(read_io->bio);
+    return DM_MAPIO_SUBMITTED;
+#else
     unsigned int nr_blocks = dmz_bio_blocks(bio);
     struct dm_io_region * where = kvmalloc_array(nr_blocks,
                                               sizeof(struct dm_io_region), GFP_KERNEL | __GFP_ZERO);
@@ -226,23 +289,28 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
     sector_t original_ppa = dm_zftl_get(dm_zftl->mapping_table, start_sec);
     for(i = 0; i < nr_blocks; ++i){
         ppa = dm_zftl_get(dm_zftl->mapping_table, start_sec + dmz_blk2sect(i));
-        where[i].bdev = dm_zftl->zone_device->bdev;
+        where[i].bdev = dm_zftl->cache_device->bdev;
         where[i].sector = ppa;
         where[i].count = dmz_blk2sect(1);
-//        if(ppa == (sector_t) 0){
+        if (ppa != (sector_t)0) {
+            printk(KERN_EMERG
+            "Bio: [%llu, %llu] Submit read to bdev [%llu, %llu]",
+            start_sec + dmz_blk2sect(i),
+            start_sec + dmz_blk2sect(i + 1),
+            dm_zftl_get(dm_zftl->mapping_table, start_sec + dmz_blk2sect(i)),
+            dm_zftl_get(dm_zftl->mapping_table, start_sec + dmz_blk2sect(i)) + dmz_blk2sect(1));
+        }
+        //        if(ppa == (sector_t) 0){
 //            //printk(KERN_EMERG "Unmapped IO %llu (%llu secs)", start_sec, dmz_bio_blocks(bio) * 8);
 //            goto RETURN_ZERO;
 //        }
     }
 
-#if DM_ZFTL_MAPPING_DEBUG
-    printk(KERN_EMERG "Submit read to bdev [%llu, %llu]", original_ppa, original_ppa + dmz_blk2sect(nr_blocks));
-#endif
 
     struct dm_io_request iorq;
 
     iorq.bi_op = REQ_OP_READ;
-    iorq.bi_op_flags = REQ_SYNC;
+    iorq.bi_op_flags = 0;
     iorq.mem.type = DM_IO_BIO;
     iorq.mem.ptr.bio = bio;
     iorq.notify.fn = dm_zftl_dm_io_read_cb;
@@ -256,6 +324,7 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
     zero_fill_bio(bio);
     bio_endio(bio);
     return DM_MAPIO_SUBMITTED;
+#endif
 }
 
 void dm_zftl_dm_io_write_cb(unsigned long error, void * context){
@@ -300,16 +369,21 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
     int i, ret;
     sector_t start_sec = bio->bi_iter.bi_sector;
     sector_t ppa;
-    sector_t start_ppa = dm_zftl_get_seq_wp(dm_zftl->zone_device, bio);
+    sector_t start_ppa = dm_zftl_get_seq_wp(dm_zftl->cache_device, bio);
 
     ppa = start_ppa;
     where->sector = ppa;
-    where->bdev = dm_zftl->zone_device->bdev;
+    where->bdev = dm_zftl->cache_device->bdev;
     where->count = dmz_blk2sect(dmz_bio_blocks(bio));
     dm_zftl_update_mapping(dm_zftl->mapping_table,
                            start_sec,
                            start_ppa,
                            dmz_bio_blocks(bio));
+    printk(KERN_EMERG
+    "Bio: [%llu, %llu] Submit write to bdev [%llu, %llu]", start_sec, start_sec + dmz_blk2sect(dmz_bio_blocks(bio)),
+            dm_zftl_get_seq_wp(dm_zftl->cache_device, bio),
+            dm_zftl_get_seq_wp(dm_zftl->cache_device, bio) + dmz_blk2sect(dmz_bio_blocks(bio))
+            );
 
 #if DM_ZFTL_MAPPING_DEBUG
     printk(KERN_EMERG "Submit write to bdev [%llu, %llu]", start_ppa, start_ppa + where->count);
@@ -327,7 +401,7 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
     iorq.notify.context = context;
     iorq.client = dm_zftl->io_client;
 
-    dm_zftl->zone_device->zoned_metadata->opened_zoned->wp += dmz_blk2sect(dmz_bio_blocks(bio));
+    dm_zftl->cache_device->zoned_metadata->opened_zoned->wp += dmz_blk2sect(dmz_bio_blocks(bio));
 
     //return dm_io(&iorq, 1, where, NULL);
     dm_io(&iorq, 1, where, NULL);
@@ -442,12 +516,16 @@ int dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
 
             break;
         case REQ_OP_DISCARD:
+#if DM_ZFTL_DEBUG
             printk(KERN_EMERG "Write zero triggered");
+#endif
             ret = DM_MAPIO_SUBMITTED;
             bio_endio(bio);
             break;
         case REQ_OP_WRITE_ZEROES:
+#if DM_ZFTL_DEBUG
             printk(KERN_EMERG "Discard operation triggered");
+#endif
             ret = DM_MAPIO_SUBMITTED;
             bio_endio(bio);
             break;
@@ -510,7 +588,6 @@ static int dm_zftl_map(struct dm_target *ti, struct bio *bio)
             (unsigned long long)(sector + nr_sectors),
             (unsigned long long)dmz_bio_block(bio),
             (unsigned long long)dmz_bio_blocks(bio) + dmz_bio_block(bio));
-
 #endif
 
     if (!nr_sectors && bio_op(bio) != REQ_OP_WRITE)
@@ -723,7 +800,7 @@ static void dm_zftl_io_hints(struct dm_target *ti, struct queue_limits *limits)
     limits->max_sectors = zone_sectors;
 
     /* We are exposing a drive-managed zoned block device */
-    limits->zoned = BLK_ZONED_HM;
+    limits->zoned = DM_ZFTL_EXPOSE_TYPE;
 }
 
 void dm_zftl_mapping_table_test(struct dm_zftl_target *dm_zftl){
@@ -737,8 +814,8 @@ void dm_zftl_mapping_table_test(struct dm_zftl_target *dm_zftl){
     unsigned int i;
     sector_t ret;
     for(i = 0; i < nr_blocks; ++i ){
-        ret = dm_zftl_get(l2p, start_sec + i * dmz_blk2sect(i));
-        printk(KERN_EMERG "sec:%llu => sec:%llu",start_sec + i * dmz_blk2sect(i), ret);
+        ret = dm_zftl_get(l2p, start_sec + i * dmz_blk2sect(1));
+        printk(KERN_EMERG "sec:%llu => sec:%llu",start_sec + i * dmz_blk2sect(1), ret);
     }
     printk(KERN_EMERG "End mapping test....");
     return;
