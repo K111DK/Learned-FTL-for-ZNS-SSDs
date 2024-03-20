@@ -35,7 +35,7 @@
 #include <linux/pid.h>
 #include <linux/jhash.h>
 
-
+#define DM_ZFTL_UNMAPPED_PPA 0
 #define DM_ZFTL_READ_SPLIT 1
 #define DM_ZFTL_EXPOSE_TYPE BLK_ZONED_NONE
 #define DM_ZFTL_MAPPING_DEBUG 0
@@ -98,13 +98,18 @@ struct dm_zftl_read_io {
 };
 #endif
 
-
+enum {
+    DM_ZFTL_IO_COMPLETE,
+    DM_ZFTL_IO_IN_PROG
+};
 struct dm_zftl_io_work{
     struct work_struct	work;
     struct bio * bio_ctx;
     struct dm_zftl_target * target;
     refcount_t		ref;
     sector_t		user_sec;
+    int io_complete;
+    spinlock_t lock_;
 };
 
 

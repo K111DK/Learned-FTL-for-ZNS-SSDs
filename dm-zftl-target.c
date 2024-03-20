@@ -12,6 +12,34 @@
 #include <linux/dm-ioctl.h>
 #include <linux/spinlock.h>
 
+void dm_zftl_bio_endio(struct bio *bio, blk_status_t status)
+{
+    unsigned long flags;
+    struct dm_zftl_io_work *bioctx = dm_per_bio_data(bio, sizeof(struct dm_zftl_io_work));
+
+    spin_lock_irqsave(&bioctx->lock_, flags);
+
+    if (status != BLK_STS_OK && bio->bi_status == BLK_STS_OK)
+        bio->bi_status = status;
+
+//    if (bioctx->dev && bio->bi_status != BLK_STS_OK)
+//        bioctx->dev->flags |= DMZ_CHECK_BDEV;
+
+    if (bioctx->io_complete == DM_ZFTL_IO_COMPLETE) {
+        bio_endio(bio);
+    }
+
+    spin_unlock_irqrestore(&bioctx->lock_, flags);
+}
+
+void dm_zftl_io_complete(struct bio* bio){
+    unsigned long flags;
+    struct dm_zftl_io_work *context = dm_per_bio_data(bio, sizeof(struct dm_zftl_io_work));
+    spin_lock_irqsave(&context->lock_, flags);
+    context->io_complete = DM_ZFTL_IO_COMPLETE;
+    spin_unlock_irqrestore(&context->lock_, flags);
+}
+
 int dm_zftl_iterate_devices(struct dm_target *ti,
                         iterate_devices_callout_fn fn, void *data)
 {
@@ -81,6 +109,11 @@ sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, struct bio * bio){
     int ret;
     unsigned int bio_len = bio_sectors(bio);
     struct zone_info * opened_zone = dev->zoned_metadata->opened_zoned;
+    if(!opened_zone){
+        printk(KERN_EMERG "Error: Dev:%s no remaining free zone",
+                dm_zftl_is_cache(dev) == DM_ZFTL_CACHE ? "Cache":"ZNS");
+        return DM_ZFTL_UNMAPPED_PPA;
+    }
 
     try_get_wp:
 
@@ -92,8 +125,9 @@ sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, struct bio * bio){
     dm_zftl_zone_close(dev, opened_zone->id);
     ret = dm_zftl_open_new_zone(dev);
     if(ret){
-        printk(KERN_EMERG "Error: can't alloc free zone");
-        return -1;
+        printk(KERN_EMERG "Error: Dev:%s can't alloc free zone",
+               dm_zftl_is_cache(dev) == DM_ZFTL_CACHE ? "Cache":"ZNS");
+        return DM_ZFTL_UNMAPPED_PPA;
     }
     opened_zone = dev->zoned_metadata->opened_zoned;
     goto try_get_wp;
@@ -110,7 +144,9 @@ static inline void dm_zftl_init_bioctx(struct dm_zftl_target *dm_zftl,
     bioctx->target = dm_zftl;
     bioctx->user_sec = bio->bi_iter.bi_sector;
     bioctx->bio_ctx = bio;
+    bioctx->io_complete = DM_ZFTL_IO_IN_PROG;
     refcount_set(&bioctx->ref, 1);
+    spin_lock_init(&bioctx->lock_);
 }
 
 void dm_zftl_dm_io_read_cb(unsigned long error, void * context){
@@ -135,7 +171,6 @@ void dm_zftl_read_split_cb(unsigned long error, void * context){
 
 
 int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
-#if DM_ZFTL_READ_SPLIT
     //
     struct zoned_dev * dev = dm_zftl_get_foregound_io_dev(dm_zftl);
 
@@ -193,68 +228,32 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
 
         //spin_unlock_irqrestore(&read_io->lock_, read_io->flag);
     }
-    bio_endio(read_io->bio);
+    dm_zftl_io_complete(bio);
     return DM_MAPIO_SUBMITTED;
-#else
-    unsigned int nr_blocks = dmz_bio_blocks(bio);
-    struct dm_io_region * where = kvmalloc_array(nr_blocks,
-                                              sizeof(struct dm_io_region), GFP_KERNEL | __GFP_ZERO);
-    int i, ret;
-    sector_t start_sec = bio->bi_iter.bi_sector;
-    sector_t ppa;
-    sector_t original_ppa = dm_zftl_get(dm_zftl->mapping_table, start_sec);
-    for(i = 0; i < nr_blocks; ++i){
-        ppa = dm_zftl_get(dm_zftl->mapping_table, start_sec + dmz_blk2sect(i));
-        where[i].bdev = dev->bdev;
-        where[i].sector = ppa;
-        where[i].count = dmz_blk2sect(1);
-        //        if(ppa == (sector_t) 0){
-//            //printk(KERN_EMERG "Unmapped IO %llu (%llu secs)", start_sec, dmz_bio_blocks(bio) * 8);
-//            goto RETURN_ZERO;
-//        }
-    }
-
-
-    struct dm_io_request iorq;
-
-    iorq.bi_op = REQ_OP_READ;
-    iorq.bi_op_flags = 0;
-    iorq.mem.type = DM_IO_BIO;
-    iorq.mem.ptr.bio = bio;
-    iorq.notify.fn = dm_zftl_dm_io_read_cb;
-    iorq.notify.context = bio;
-    iorq.client = dm_zftl->io_client;
-
-    return dm_io(&iorq, nr_blocks, where, NULL);
-
-
-    RETURN_ZERO:
-    zero_fill_bio(bio);
-    bio_endio(bio);
-    return DM_MAPIO_SUBMITTED;
-#endif
 }
 
 void dm_zftl_dm_io_write_cb(unsigned long error, void * context){
     struct dm_zftl_io_work * io_work =(struct dm_zftl_io_work *) context;
     struct bio * bio = io_work->bio_ctx;
     struct dm_zftl_target * dm_zftl = io_work->target;
-
-
-    bio_endio(bio);
 //    clear_bit_unlock(DMZAP_WR_OUTSTANDING, &dm_zftl->zone_device->write_bitmap);
 }
 
 int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
-
+    struct dm_zftl_io_work *context = dm_per_bio_data(bio, sizeof(struct dm_zftl_io_work));
     struct zoned_dev * dev = dm_zftl_get_foregound_io_dev(dm_zftl);
-
     struct dm_io_region * where = kvmalloc_array(1, sizeof(struct dm_io_region), GFP_KERNEL | __GFP_ZERO);
     int i, ret;
 
     sector_t start_sec = bio->bi_iter.bi_sector;
     sector_t ppa;
     sector_t start_ppa = dm_zftl_get_seq_wp(dev, bio);
+
+    if(start_ppa == DM_ZFTL_UNMAPPED_PPA){
+        ret = -EIO;
+        goto FINISH;
+    }
+
     ppa = start_ppa;
     where->sector = ppa;
     where->bdev = dev->bdev;
@@ -276,9 +275,6 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
 #endif
 
     struct dm_io_request iorq;
-    struct dm_zftl_io_work * context = (struct dm_zftl_io_work *)vmalloc(sizeof(struct dm_zftl_io_work));
-    context->bio_ctx = bio;
-    context->target = dm_zftl;
     iorq.bi_op = REQ_OP_WRITE;
     iorq.bi_op_flags = REQ_SYNC;
     iorq.mem.type = DM_IO_BIO;
@@ -291,21 +287,19 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
 
     //return dm_io(&iorq, 1, where, NULL);
     dm_io(&iorq, 1, where, NULL);
-    bio_endio(bio);
-    return DM_MAPIO_SUBMITTED;
+    ret = DM_MAPIO_SUBMITTED;
 
-
-    RETURN_ZERO:
-    zero_fill_bio(bio);
-    bio_endio(bio);
-    return DM_MAPIO_SUBMITTED;
+    FINISH:
+    dm_zftl_io_complete(bio);
+    return ret;
 }
+
 
 
 /*
  * Handle IO
  * */
-int dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
+void dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
                      struct dm_zftl_io_work *io, struct bio *bio){
     int ret;
 
@@ -315,8 +309,8 @@ int dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
 //    }
 
     if (!bio_sectors(bio)) {
+        dm_zftl_io_complete(bio);
         ret = DM_MAPIO_SUBMITTED;
-        bio_endio(bio);
         goto out;
     }
 
@@ -369,22 +363,22 @@ int dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
             mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
             break;
         case REQ_OP_DISCARD:
-            ret = DM_MAPIO_SUBMITTED;
-            bio_endio(bio);
-            break;
         case REQ_OP_WRITE_ZEROES:
+            dm_zftl_io_complete(bio);
             ret = DM_MAPIO_SUBMITTED;
-            bio_endio(bio);
             break;
         default:
+            dm_zftl_io_complete(bio);
             printk(KERN_EMERG "Ignoring unsupported BIO operation 0x%x",
                         bio_op(bio));
             ret = -EIO;
     }
 
     out:
-    return DM_MAPIO_SUBMITTED;;
+    dm_zftl_bio_endio(bio, errno_to_blk_status(ret));
 }
+
+
 
 /*
  *
@@ -496,6 +490,7 @@ static int dm_zftl_load_device(struct dm_target *ti, char **argv){
     dmz->zone_device->bdev = bdev;
     dmz->zone_device->capacity_nr_sectors = i_size_read(bdev->bd_inode) >> SECTOR_SHIFT;
     dmz->zone_device->dmdev = ddev;
+    dmz->zone_device->flags = DM_ZFTL_BACKEND;
 
 
     struct request_queue *q;
@@ -523,6 +518,7 @@ static int dm_zftl_load_device(struct dm_target *ti, char **argv){
         return ret;
     }
     dmz->cache_device->dmdev = ddev;
+    dmz->cache_device->flags = DM_ZFTL_CACHE;
     bdev = ddev->bdev;
     dmz->cache_device->bdev = bdev;
     dmz->cache_device->capacity_nr_sectors = i_size_read(bdev->bd_inode) >> SECTOR_SHIFT;
@@ -573,6 +569,9 @@ static int dm_zftl_geometry_init(struct dm_target *ti)
     INIT_LIST_HEAD(&zoned_device_metadata->free_zoned);
     INIT_LIST_HEAD(&zoned_device_metadata->full_zoned);
     INIT_LIST_HEAD(&zoned_device_metadata->open_zoned);
+    atomic_set(&zoned_device_metadata->nr_free_zone, (int)zftl->zone_device->nr_zones);
+    atomic_set(&zoned_device_metadata->nr_full_zone, 0);
+
     for(i = 0; i < zftl->zone_device->nr_zones; ++i){
         zoned_device_metadata->zones[i].dev = zftl->zone_device;
         atomic_set(&zoned_device_metadata->zones[i].refcount, 0);
@@ -595,8 +594,11 @@ static int dm_zftl_geometry_init(struct dm_target *ti)
     INIT_LIST_HEAD(&cache_device_metadata->free_zoned);
     INIT_LIST_HEAD(&cache_device_metadata->full_zoned);
     INIT_LIST_HEAD(&cache_device_metadata->open_zoned);
+    atomic_set(&cache_device_metadata->nr_free_zone, (int)zftl->cache_device->nr_zones - 1);
+    atomic_set(&cache_device_metadata->nr_full_zone, 0);
+
     //TODO: first zone of cache device is metadata zone, which is't vaild for mapping
-    for(i = 0; i < zftl->cache_device->nr_zones; ++i){
+    for(i = 1; i < zftl->cache_device->nr_zones; ++i){
         cache_device_metadata->zones[i].dev = zftl->cache_device;
         atomic_set(&cache_device_metadata->zones[i].refcount, 0);
         cache_device_metadata->zones[i].wp = 0;
@@ -755,27 +757,30 @@ static void __exit dm_zftl_exit(void)
 }
 
 
-
-
-
-
 int dm_zftl_open_new_zone(struct zoned_dev * dev){
-    struct zone_link_entry *zone_link;
+
+    if(atomic_read(&dev->zoned_metadata->nr_free_zone) == 0)
+        return 1;
+
+    struct zone_link_entry *zone_link = NULL;
     list_for_each_entry(zone_link, &dev->zoned_metadata->free_zoned, link){
         if(zone_link)
-            break;
+            goto FOUND;
+
     }
-    if(!zone_link)
-        return 1;
+    return 1;
+
+    FOUND:
     list_del(&zone_link->link);
     atomic_dec(&dev->zoned_metadata->nr_free_zone);
     dev->zoned_metadata->opened_zoned = &dev->zoned_metadata->zones[zone_link->id];
 #if DM_ZFTL_DEBUG
     printk(KERN_EMERG "Open new zone => Device:%s Id:%llu Range: [%llu, %llu](blocks)"
-                                    , dm_zftl_is_cache(dev) ? "cache" : "backend"
-                                    , zone_link->id
-                                    , zone_link->id * dev->zone_nr_blocks
-                                    , (zone_link->id + 1) * dev->zone_nr_blocks);
+            , dm_zftl_is_cache(dev) ? "Cache" : "ZNS"
+            , zone_link->id
+            , zone_link->id * dev->zone_nr_blocks
+            , (zone_link->id + 1) * dev->zone_nr_blocks);
+    printk(KERN_EMERG "Remaing free zone:%d", atomic_read(&dev->zoned_metadata->nr_free_zone));
 #endif
     return 0;
 }
