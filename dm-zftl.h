@@ -195,4 +195,22 @@ int dm_zftl_reset_zone(struct zoned_dev * dev, struct zone_info *zone);
 void dm_zftl_zone_close(struct zoned_dev * dev, unsigned int zone_id);
 int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio);
 
+
+//TODO:Write back
+//TODO:Reclaiming
+struct dm_zftl_kcopy_job {
+    int nr_blocks;
+    struct page
+
+
+};
+//use delay_work => trigger write_back when reach threshold
+//1) block all incoming write io & wait all current write io done
+//2) copy valid data to zns
+//3) update mapping
+//4) unblock io
+// p2l->mapping
+// page_list->
+//
+
 #endif //DM_ZFTL_DM_ZFTL_H

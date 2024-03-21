@@ -73,10 +73,9 @@ int dm_zftl_init_mapping_table(struct dm_zftl_target * dm_zftl){
 
 sector_t dm_zftl_get(struct dm_zftl_mapping_table * mapping_table, sector_t lba){
     sector_t ppa;
-//  TODO:buggy
-//    if((unsigned int)lba > mapping_table->l2p_table_sz){
-//        ppa = 0;
-//    }
+    if((unsigned int)lba > mapping_table->l2p_table_sz){
+        ppa = DM_ZFTL_UNMAPPED_PPA;
+    }
     int is_backend = mapping_table->device_bitmap[lba / 8] & ((uint8_t)(1) << (lba % 8));
     ppa = mapping_table->l2p_table[dmz_sect2blk(lba)];
     return dmz_blk2sect(ppa);
@@ -397,8 +396,6 @@ static void dm_zftl_io_work_(struct work_struct *work){
  *
  * */
 static int dm_zftl_queue_io(struct dm_zftl_target *dm_zftl, struct bio *bio){
-//TODO:Queue io
-/* Create a new chunk work */
     struct dm_zftl_io_work * io_work = kmalloc(sizeof(struct dm_zftl_io_work), GFP_NOIO);
     INIT_WORK(&io_work->work, dm_zftl_io_work_);
     io_work->bio_ctx = bio;
@@ -445,7 +442,7 @@ static int dm_zftl_map(struct dm_target *ti, struct bio *bio)
 //        return DM_MAPIO_SUBMITTED;
 //    }
 
-    /* Split zone BIOs to fit entirely into a zone TODO:Do we need this?? */
+    /* Split zone BIOs to fit entirely into a zone */
     zone_sector = sector & (dev->zone_nr_sectors - 1);
     if (zone_sector + nr_sectors > dev->zone_nr_sectors) {
 #if DM_ZFTL_DEBUG
@@ -597,7 +594,7 @@ static int dm_zftl_geometry_init(struct dm_target *ti)
     atomic_set(&cache_device_metadata->nr_free_zone, (int)zftl->cache_device->nr_zones - 1);
     atomic_set(&cache_device_metadata->nr_full_zone, 0);
 
-    //TODO: first zone of cache device is metadata zone, which is't vaild for mapping
+
     for(i = 1; i < zftl->cache_device->nr_zones; ++i){
         cache_device_metadata->zones[i].dev = zftl->cache_device;
         atomic_set(&cache_device_metadata->zones[i].refcount, 0);
@@ -700,8 +697,6 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
         goto err_dev;
     }
 
-
-
     ti->max_io_len = dmz->zone_device->zone_nr_sectors;
     ti->num_flush_bios = 1;
     ti->num_discard_bios = 1;
@@ -711,8 +706,6 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     ti->discards_supported = false;
     /* The exposed capacity is the number of chunks that can be mapped */
     ti->len = dmz->capacity_nr_sectors;
-
-
 
     return 0;
     err_map:
@@ -839,6 +832,7 @@ void dm_zftl_zone_close(struct zoned_dev * dev, unsigned int zone_id){
     zone_link->id = zone_id;
     list_add(&zone_link->link, &dev->zoned_metadata->full_zoned);
     dev->zoned_metadata->opened_zoned = NULL;
+    atomic_inc(&dev->zoned_metadata->nr_full_zone);
 }
 
 
