@@ -11,6 +11,20 @@
 #include <linux/bio.h>
 #include <linux/dm-ioctl.h>
 #include <linux/spinlock.h>
+void dm_zftl_invalidate_ppn(struct dm_zftl_mapping_table * mapping_table, sector_t ppn){
+    mapping_table->validate_bitmap[ppn / 8] &=  (~((uint8_t) 1 << (ppn % 8)));
+}
+
+void dm_zftl_validate_ppn(struct dm_zftl_mapping_table * mapping_table, sector_t ppn){
+    mapping_table->validate_bitmap[ppn / 8] |=  ((uint8_t) 1 << (ppn % 8));
+}
+
+int dm_zftl_ppn_is_valid(struct dm_zftl_mapping_table * mapping_table, sector_t ppn){
+    if((mapping_table->validate_bitmap[ppn / 8] & ((uint8_t) 1 << (ppn % 8))) == (uint8_t)0)
+        return 0;
+    return 1;
+}
+
 struct zoned_dev * dm_zftl_get_ppa_dev(struct dm_zftl_target * dm_zftl, sector_t ppa){
     if(ppa >= dm_zftl->cache_device->capacity_nr_sectors){
         return dm_zftl->zone_device;
@@ -71,14 +85,18 @@ int dm_zftl_init_mapping_table(struct dm_zftl_target * dm_zftl){
     dm_zftl->mapping_table = (struct dm_zftl_mapping_table *)vmalloc(sizeof(struct dm_zftl_mapping_table));
     mutex_init(&dm_zftl->mapping_table->l2p_lock);
     dm_zftl->mapping_table->l2p_table_sz = dmz_sect2blk(dm_zftl->capacity_nr_sectors);
-    dm_zftl->mapping_table->l2p_table  = kvmalloc_array(dm_zftl->mapping_table->l2p_table_sz + 1000,
+    dm_zftl->mapping_table->l2p_table = kvmalloc_array(dm_zftl->mapping_table->l2p_table_sz,
                                                         sizeof(uint32_t), GFP_KERNEL | __GFP_ZERO);
-    dm_zftl->mapping_table->device_bitmap = kvmalloc_array( (dm_zftl->mapping_table->l2p_table_sz + 1000) / 8 + 1 ,
+    dm_zftl->mapping_table->p2l_table = kvmalloc_array(dm_zftl->mapping_table->l2p_table_sz,
+                                                       sizeof(uint32_t), GFP_KERNEL | __GFP_ZERO);
+    dm_zftl->mapping_table->device_bitmap = kvmalloc_array( (dm_zftl->mapping_table->l2p_table_sz) / 8 + 1 ,
+                                                            sizeof(uint8_t), GFP_KERNEL | __GFP_ZERO);
+    dm_zftl->mapping_table->validate_bitmap = kvmalloc_array( (dm_zftl->mapping_table->l2p_table_sz) / 8 + 1 ,
                                                             sizeof(uint8_t), GFP_KERNEL | __GFP_ZERO);
     int i;
-    for(i = 0; i < dm_zftl->mapping_table->l2p_table_sz + 1000; ++i){
+    for(i = 0; i < dm_zftl->mapping_table->l2p_table_sz; ++i){
         dm_zftl->mapping_table->l2p_table[i] = 0;
-        dm_zftl->mapping_table->device_bitmap[ i / 8 ] &= ((uint8_t)(1) << (i % 8));
+        dm_zftl->mapping_table->validate_bitmap[ i / 8 ] = 0;
     }
     return 0;
 }
@@ -94,10 +112,20 @@ sector_t dm_zftl_get(struct dm_zftl_mapping_table * mapping_table, sector_t lba)
 }
 
 
+
 int dm_zftl_set(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa){
-    mapping_table->l2p_table[dmz_sect2blk(lba)] = dmz_sect2blk(ppa);
+    sector_t lpn, ppn, original_ppn;
+    lpn = dmz_sect2blk(lba);
+    original_ppn = mapping_table->l2p_table[lpn];
+    ppn = dmz_sect2blk(ppa);
+    mapping_table->l2p_table[lpn] = ppn;
+    mapping_table->p2l_table[ppn] = lpn;
+    dm_zftl_invalidate_ppn(mapping_table, original_ppn);
+    dm_zftl_validate_ppn(mapping_table, ppn);
     return 0;
 }
+
+
 
 
 int dm_zftl_update_mapping(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, sector_t nr_blocks){

@@ -81,7 +81,9 @@ enum {
 struct dm_zftl_mapping_table{
     unsigned int l2p_table_sz; // in blocks
     uint32_t * l2p_table; // all unmapped lba will be mapped to 0 (which is metadata zoned)
+    uint32_t * p2l_table;
     uint8_t * device_bitmap; // 0-> cache 1-> backedend 1B -> 4*8 = 32KB: 32MB/TB
+    uint8_t * validate_bitmap;
     struct mutex l2p_lock;
 };
 
@@ -188,7 +190,6 @@ struct zone_info {
     unsigned int		id;
     /* Zone write pointer sector (relative to the zone start block) */
     unsigned int		wp;
-    uint8_t * validate_bitmap;
     spinlock_t lock_;
 };
 
