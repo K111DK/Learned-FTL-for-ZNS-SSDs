@@ -35,6 +35,8 @@
 #include <linux/pid.h>
 #include <linux/jhash.h>
 
+
+#define DM_ZFTL_FULL_THRESHOLD 0
 #define DM_ZFTL_UNMAPPED_PPA 0
 #define DM_ZFTL_READ_SPLIT 1
 #define DM_ZFTL_EXPOSE_TYPE BLK_ZONED_NONE
@@ -139,6 +141,8 @@ enum {
 
 struct zoned_dev {
 
+
+
     struct block_device	*bdev;
     struct dm_dev * dmdev;
     struct dev_metadata *zoned_metadata;
@@ -155,6 +159,7 @@ struct zoned_dev {
 };
 
 struct dev_metadata {
+    sector_t addr_offset;
     /* Zone information array */
     struct zone_info * zones;
     atomic_t nr_open_zone;
@@ -183,8 +188,14 @@ struct zone_info {
     unsigned int		id;
     /* Zone write pointer sector (relative to the zone start block) */
     unsigned int		wp;
+    uint8_t * validate_bitmap;
     spinlock_t lock_;
 };
+
+int dm_zftl_init_bitmap(struct dm_zftl_target * dm_zftl);
+
+
+
 
 
 struct zoned_dev * dm_zftl_get_foregound_io_dev(struct dm_zftl_target * dm_zftl);
