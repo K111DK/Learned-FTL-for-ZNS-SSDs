@@ -478,10 +478,11 @@ void dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
      * Write may trigger a zone allocation. So make sure the
      * allocation can succeed.
      */
-    //TODO:Write traffic
+    //TODO:Write traffic Record
     if (bio_op(bio) == REQ_OP_WRITE){
         dm_zftl->total_write_traffic_sec_ += bio_sectors(bio);
         dm_zftl->last_write_traffic_ += bio_sectors(bio);
+        dm_zftl_try_reclaim(dm_zftl);
     }
 
 #if DM_ZFTL_DEBUG
@@ -873,16 +874,17 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
         goto err_dev;
     }
 
-    dmz->reclaim_work = vmalloc(sizeof(struct dm_zftl_reclaim_read_work));
-    dmz->reclaim_work->target = dmz;
-    INIT_DELAYED_WORK(&dmz->reclaim_work->work, dm_zftl_reclaim_read_work);
     dmz->reclaim_read_wq = alloc_ordered_workqueue("dmz_zftl_rec", WQ_MEM_RECLAIM, 0);
     if (!dmz->reclaim_read_wq) {
         ti->error = "Create reclaim workqueue failed";
         ret = -ENOMEM;
         goto err_dev;
     }
-    mod_delayed_work(dmz->reclaim_read_wq, &dmz->reclaim_work->work, DM_ZFTL_RECLAIM_PERIOD);
+
+    //dmz->reclaim_work = vmalloc(sizeof(struct dm_zftl_reclaim_read_work));
+    //dmz->reclaim_work->target = dmz;
+    //INIT_DELAYED_WORK(&dmz->reclaim_work->work, dm_zftl_reclaim_read_work);
+    //mod_delayed_work(dmz->reclaim_read_wq, &dmz->reclaim_work->work, DM_ZFTL_RECLAIM_PERIOD);
 
 
 

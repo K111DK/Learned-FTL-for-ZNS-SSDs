@@ -130,7 +130,7 @@ struct dm_zftl_io_work{
 };
 
 struct dm_zftl_reclaim_read_work{
-    struct delayed_work work;
+    struct work_struct work;
     struct dm_zftl_target * target;
 };
 
@@ -200,6 +200,7 @@ struct copy_job {
     struct work_struct work;
     spinlock_t lock_;
 };
+
 int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_job * job);
 int dm_zftl_read_valid_zone_data_to_buffer(struct dm_zftl_target * dm_zftl, struct copy_job * cp_job, unsigned int zone_id);
 
@@ -269,8 +270,9 @@ int dm_zftl_reset_all(struct zoned_dev * dev);
 int dm_zftl_reset_zone(struct zoned_dev * dev, struct zone_info *zone);
 void dm_zftl_zone_close(struct zoned_dev * dev, unsigned int zone_id);
 int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio);
-
-
+int dm_zftl_need_reclaim(struct dm_zftl_target * dm_zftl);
+void dm_zftl_do_reclaim(struct work_struct *work);
+void dm_zftl_try_reclaim(struct dm_zftl_target * dm_zftl);
 //use delay_work => trigger write_back when reach threshold
 //1) block all incoming write io & wait all current write io done
 //2) copy valid data to zns

@@ -6,6 +6,17 @@
 #define BLOCK_4K_SIZE 4096
 #define COPY_BUFFER_SIZE 65536
 
+
+void dm_zftl_try_reclaim(struct dm_zftl_target * dm_zftl){
+    if(dm_zftl_need_reclaim(dm_zftl)){
+        printk(KERN_EMERG "Trigger reclaim");
+        struct dm_zftl_reclaim_read_work * read_work = kmalloc(sizeof(struct dm_zftl_reclaim_read_work), GFP_NOIO);
+        INIT_WORK(&read_work->work, dm_zftl_do_reclaim);
+        read_work->target = dm_zftl;
+        queue_work(dm_zftl->reclaim_read_wq, &read_work->work);
+    }
+}
+
 int dm_zftl_need_reclaim(struct dm_zftl_target * dm_zftl){
     if(dm_zftl->last_write_traffic_ >= DM_ZFTL_RECLAIM_INTERVAL
         && DM_ZFTL_RECLAIM_ENABLE){
@@ -16,8 +27,11 @@ int dm_zftl_need_reclaim(struct dm_zftl_target * dm_zftl){
 }
 
 
-void dm_zftl_do_reclaim(struct dm_zftl_target * dm_zftl){
-    struct copy_job * cp_job = (struct copy_job *)vmalloc(sizeof (struct copy_job));
+void dm_zftl_do_reclaim(struct work_struct *work){
+    struct dm_zftl_reclaim_read_work * read_work = container_of(work, struct dm_zftl_reclaim_read_work, work);
+    struct dm_zftl_target * dm_zftl = read_work->target;
+
+    struct copy_job * cp_job = vmalloc(sizeof (struct copy_job));
     cp_job->dm_zftl = dm_zftl;
     cp_job->copy_from = dm_zftl->cache_device;
     cp_job->writeback_to = dm_zftl->zone_device;
@@ -46,19 +60,6 @@ void dm_zftl_do_reclaim(struct dm_zftl_target * dm_zftl){
 
     OUT:
     mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
-}
-
-
-void dm_zftl_reclaim_read_work(struct work_struct *work){
-    struct dm_zftl_reclaim_read_work * read_work = container_of(work, struct dm_zftl_reclaim_read_work, work.work);
-    struct dm_zftl_target * dm_zftl = read_work->target;
-
-    if(dm_zftl_need_reclaim(dm_zftl)){
-        printk(KERN_EMERG "Trigger reclaim");
-        dm_zftl_do_reclaim(dm_zftl);
-    }
-
-    queue_delayed_work(dm_zftl->reclaim_read_wq, &dm_zftl->reclaim_work->work, DM_ZFTL_RECLAIM_PERIOD);
 }
 
 
