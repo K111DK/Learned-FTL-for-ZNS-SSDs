@@ -24,6 +24,11 @@ int dm_zftl_ppn_is_valid(struct dm_zftl_mapping_table * mapping_table, sector_t 
         return 0;
     return 1;
 }
+unsigned int dm_zftl_get_ppa_zone_id(struct dm_zftl_target * dm_zftl, sector_t ppa){
+    struct zoned_dev *dev = dm_zftl_get_ppa_dev(dm_zftl, ppa);
+    return ppa / dev->zone_nr_sectors;
+}
+
 
 struct zoned_dev * dm_zftl_get_ppa_dev(struct dm_zftl_target * dm_zftl, sector_t ppa){
     if(ppa >= dm_zftl->cache_device->capacity_nr_sectors){
@@ -36,6 +41,7 @@ sector_t dm_zftl_get_dev_addr(struct dm_zftl_target * dm_zftl, sector_t ppa){
     struct zoned_dev * dev = dm_zftl_get_ppa_dev(dm_zftl, ppa);
     return ppa - dev->zoned_metadata->addr_offset;
 }
+
 
 
 void dm_zftl_bio_endio(struct bio *bio, blk_status_t status)
@@ -93,10 +99,12 @@ int dm_zftl_init_mapping_table(struct dm_zftl_target * dm_zftl){
                                                             sizeof(uint8_t), GFP_KERNEL | __GFP_ZERO);
     dm_zftl->mapping_table->validate_bitmap = kvmalloc_array( (dm_zftl->mapping_table->l2p_table_sz) / 8 + 1 ,
                                                             sizeof(uint8_t), GFP_KERNEL | __GFP_ZERO);
-    int i;
-    for(i = 0; i < dm_zftl->mapping_table->l2p_table_sz; ++i){
-        dm_zftl->mapping_table->l2p_table[i] = 0;
-        dm_zftl->mapping_table->validate_bitmap[ i / 8 ] = 0;
+    unsigned int ppn, lpn, i;
+    for(ppn = 0; ppn < dm_zftl->mapping_table->l2p_table_sz; ppn++){
+        lpn = ppn;
+        dm_zftl->mapping_table->l2p_table[lpn] = DM_ZFTL_UNMAPPED_PPA;
+        dm_zftl->mapping_table->p2l_table[ppn] = DM_ZFTL_UNMAPPED_LPA;
+        dm_zftl_invalidate_ppn(dm_zftl->mapping_table, ppn);
     }
     return 0;
 }
@@ -111,7 +119,15 @@ sector_t dm_zftl_get(struct dm_zftl_mapping_table * mapping_table, sector_t lba)
     return dmz_blk2sect(ppa);
 }
 
-
+int dm_zftl_set_by_bn(struct dm_zftl_mapping_table * mapping_table, sector_t lpn, sector_t ppn){
+    sector_t original_ppn;
+    original_ppn = mapping_table->l2p_table[lpn];
+    mapping_table->l2p_table[lpn] = ppn;
+    mapping_table->p2l_table[ppn] = lpn;
+    dm_zftl_invalidate_ppn(mapping_table, original_ppn);
+    dm_zftl_validate_ppn(mapping_table, ppn);
+    return 0;
+}
 
 int dm_zftl_set(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa){
     sector_t lpn, ppn, original_ppn;
@@ -125,7 +141,22 @@ int dm_zftl_set(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sect
     return 0;
 }
 
-
+int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_table,
+                                                    unsigned int * lpn_array,
+                                                    sector_t ppn,
+                                                    unsigned int nr_block){
+    unsigned int i = 0;
+    for(i = 0; i < nr_block; ++i){
+#if DM_ZFTL_MAPPING_DEBUG
+        printk(KERN_EMERG "L2P Update: LPN:%llu ==> PPN:%llu [%llu blocks]",
+           lpn_array[i],
+           ppn + i,
+           1);
+#endif
+        dm_zftl_set_by_bn(mapping_table, lpn_array[i], ppn + i);
+    }
+    return 0;
+}
 
 
 int dm_zftl_update_mapping(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, sector_t nr_blocks){
@@ -143,10 +174,9 @@ int dm_zftl_update_mapping(struct dm_zftl_mapping_table * mapping_table, sector_
 }
 
 
-sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, struct bio * bio){
+sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, sector_t len){
     sector_t wp;
     int ret;
-    unsigned int bio_len = bio_sectors(bio);
     struct zone_info * opened_zone = dev->zoned_metadata->opened_zoned;
     if(!opened_zone){
         printk(KERN_EMERG "Error: Dev:%s no remaining free zone",
@@ -156,7 +186,7 @@ sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, struct bio * bio){
 
     try_get_wp:
 
-    if(opened_zone->wp + bio_len <= (unsigned int)dev->zone_nr_sectors){
+    if(opened_zone->wp + len <= (unsigned int)dev->zone_nr_sectors){
         wp = opened_zone->wp + opened_zone->id * dev->zone_nr_sectors + dev->zoned_metadata->addr_offset;
         return wp;
     }
@@ -172,6 +202,12 @@ sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, struct bio * bio){
     goto try_get_wp;
 
 }
+
+
+
+
+
+
 
 /*
  * Initialize the bio context
@@ -250,7 +286,26 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
            dm_zftl_get_ppa_dev(dm_zftl, ppa) + where[i].count
            );
 #endif
-
+//        if(!(ppa == DM_ZFTL_UNMAPPED_PPA)){
+//            printk(KERN_EMERG "[READ] Logic:%llu => Phys:%llu Dev:%s Dev addr:%llu",
+//                    (start_sec + dmz_blk2sect(i)) * 512,
+//                    ppa,
+//                    DM_ZFTL_DEV_STR(dev),
+//                    dm_zftl_get_dev_addr(dm_zftl, ppa)
+//               );
+//        }
+//        if (!dm_zftl_is_cache(dev)){
+//        printk(KERN_EMERG "Bio:READ [%llu, %llu](sec) ==> [Sub READ{%llu/%llu}] Dev:%s Zone ID:%llu Range[%llu, %llu](sec)",
+//                start_sec + dmz_blk2sect(i),
+//                start_sec + dmz_blk2sect(i) + where[i].count,
+//                i + 1,
+//                nr_blocks,
+//                dm_zftl_is_cache(dev) ? "CACHE":"ZNS",
+//                dev->zoned_metadata->opened_zoned->id,
+//                dm_zftl_get_dev_addr(dm_zftl, ppa),
+//                dm_zftl_get_dev_addr(dm_zftl, ppa) + where[i].count
+//            );
+//        }
         struct dm_io_request iorq;
         iorq.bi_op = REQ_OP_READ;
         iorq.bi_op_flags = 0;
@@ -287,7 +342,11 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
 
     sector_t start_sec = bio->bi_iter.bi_sector;
     sector_t ppa;
-    sector_t start_ppa = dm_zftl_get_seq_wp(dev, bio);
+    sector_t start_ppa = dm_zftl_get_seq_wp(dev, bio_sectors(bio));
+
+    sector_t desire, addr1, addr2;
+    desire = bio->bi_iter.bi_sector;
+
 
     if(start_ppa == DM_ZFTL_UNMAPPED_PPA){
         ret = -EIO;
@@ -302,6 +361,8 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
                            start_sec,
                            start_ppa,
                            dmz_bio_blocks(bio));
+
+    addr1 = start_ppa;
 
 #if DM_ZFTL_DEBUG
     printk(KERN_EMERG "Bio:WRITE [%llu, %llu](sec) ==> Dev:%s Zone ID:%llu Range[%llu, %llu](sec)",
@@ -328,6 +389,65 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
     //return dm_io(&iorq, 1, where, NULL);
     dm_io(&iorq, 1, where, NULL);
     ret = DM_MAPIO_SUBMITTED;
+
+#if DM_ZFTL_VMA_COPY_TEST
+
+//Read from dev to VMA
+
+    ppa = dm_zftl_get(dm_zftl->mapping_table, start_sec); //get lpn's ppn
+    where->sector = dm_zftl_get_dev_addr(dm_zftl, ppa);  //get ppn's dev addr
+    where->bdev = dev->bdev;                             //dev
+    where->count = dmz_blk2sect(dmz_bio_blocks(bio));    //io length(sec)
+
+
+    iorq.bi_op = REQ_OP_READ;
+    iorq.bi_op_flags = 0;
+    iorq.mem.type = DM_IO_VMA;
+    iorq.mem.ptr.vma = dm_zftl_get_buffer_block_addr(dm_zftl, 0);
+    iorq.notify.fn = 0;
+    iorq.notify.context = 0;
+    iorq.client = dm_zftl->io_client;
+    ret = dm_io(&iorq, 1, where, NULL);
+
+//Write from VMA to dev
+   start_sec = bio->bi_iter.bi_sector;
+   start_ppa = dm_zftl_get_seq_wp(dev, bio_sectors(bio));
+
+   addr2 = start_ppa;
+
+
+    if(start_ppa == DM_ZFTL_UNMAPPED_PPA){
+        ret = -EIO;
+        goto FINISH;
+    }
+
+    ppa = start_ppa;
+    dm_zftl_update_mapping(dm_zftl->mapping_table,
+                           start_sec,
+                           start_ppa,
+                           dmz_bio_blocks(bio));
+
+    where->sector = dm_zftl_get_dev_addr(dm_zftl, ppa);
+    where->bdev = dev->bdev;
+    where->count = dmz_blk2sect(dmz_bio_blocks(bio));
+
+    iorq.bi_op = REQ_OP_WRITE;
+    iorq.bi_op_flags = 0;
+    iorq.mem.type = DM_IO_VMA;
+    iorq.mem.ptr.vma = dm_zftl_get_buffer_block_addr(dm_zftl, 0);
+    iorq.notify.fn = 0;
+    iorq.notify.context = 0;
+    iorq.client = dm_zftl->io_client;
+    ret = dm_io(&iorq, 1, where, NULL);
+
+    dev->zoned_metadata->opened_zoned->wp += dmz_blk2sect(dmz_bio_blocks(bio));
+
+//    printk(KERN_EMERG "[Write] Logic:%llu => Phys1:%llu => Phys2:%llu",
+//            desire * 512,
+//            addr1,
+//            addr2);
+
+#endif
 
     FINISH:
     dm_zftl_io_complete(bio);
@@ -358,12 +478,11 @@ void dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
      * Write may trigger a zone allocation. So make sure the
      * allocation can succeed.
      */
-//    if (bio_op(bio) == REQ_OP_WRITE){
-//        mutex_lock(&dmzap->reclaim_lock);
-//        dmzap_schedule_reclaim(dmzap);
-//        mutex_unlock(&dmzap->reclaim_lock);
-//        dmzap->nr_user_written_sec += bio_sectors(bio);
-//    }
+    //TODO:Write traffic
+    if (bio_op(bio) == REQ_OP_WRITE){
+        dm_zftl->total_write_traffic_sec_ += bio_sectors(bio);
+        dm_zftl->last_write_traffic_ += bio_sectors(bio);
+    }
 
 #if DM_ZFTL_DEBUG
     const char * op = "UNKNOWN";
@@ -737,14 +856,40 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     ret = dm_zftl_open_new_zone(dmz->cache_device);
     ret = dm_zftl_open_new_zone(dmz->zone_device);
     ret = dm_zftl_init_mapping_table(dmz);
+    ret = dm_zftl_init_copy_buffer(dmz);
     dmz->io_client = dm_io_client_create();
 
-    dmz->io_wq = alloc_workqueue("dm_zftl_wq", WQ_MEM_RECLAIM | WQ_UNBOUND, 0);
+    dmz->io_wq = alloc_workqueue("dm_zftl_foreground_io_wq", WQ_MEM_RECLAIM | WQ_UNBOUND, 0);
     if (!dmz->io_wq) {
         ti->error = "Create io workqueue failed";
         ret = -ENOMEM;
         goto err_dev;
     }
+
+    dmz->reclaim_write_wq = alloc_workqueue("dm_zftl_reclaim_write_wq", WQ_MEM_RECLAIM | WQ_UNBOUND, 0);
+    if (!dmz->reclaim_write_wq) {
+        ti->error = "Create io workqueue failed";
+        ret = -ENOMEM;
+        goto err_dev;
+    }
+
+    dmz->reclaim_work = vmalloc(sizeof(struct dm_zftl_reclaim_read_work));
+    dmz->reclaim_work->target = dmz;
+    INIT_DELAYED_WORK(&dmz->reclaim_work->work, dm_zftl_reclaim_read_work);
+    dmz->reclaim_read_wq = alloc_ordered_workqueue("dmz_zftl_rec", WQ_MEM_RECLAIM, 0);
+    if (!dmz->reclaim_read_wq) {
+        ti->error = "Create reclaim workqueue failed";
+        ret = -ENOMEM;
+        goto err_dev;
+    }
+    mod_delayed_work(dmz->reclaim_read_wq, &dmz->reclaim_work->work, DM_ZFTL_RECLAIM_PERIOD);
+
+
+
+
+
+    dmz->last_write_traffic_ = 0;
+    dmz->total_write_traffic_sec_ = 0;
 
     ti->max_io_len = dmz->zone_device->zone_nr_sectors;
     ti->num_flush_bios = 1;
@@ -787,16 +932,6 @@ static struct target_type dm_zftl_type = {
 
 
 };
-
-static int __init dm_zftl_init(void)
-{
-    return dm_register_target(&dm_zftl_type);
-}
-
-static void __exit dm_zftl_exit(void)
-{
-    dm_unregister_target(&dm_zftl_type);
-}
 
 
 int dm_zftl_open_new_zone(struct zoned_dev * dev){
@@ -888,7 +1023,15 @@ void dm_zftl_zone_close(struct zoned_dev * dev, unsigned int zone_id){
     atomic_inc(&dev->zoned_metadata->nr_full_zone);
 }
 
+static int __init dm_zftl_init(void)
+{
+    return dm_register_target(&dm_zftl_type);
+}
 
+static void __exit dm_zftl_exit(void)
+{
+    dm_unregister_target(&dm_zftl_type);
+}
 module_init(dm_zftl_init);
 module_exit(dm_zftl_exit);
 

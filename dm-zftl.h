@@ -35,9 +35,22 @@
 #include <linux/pid.h>
 #include <linux/jhash.h>
 
+#define KB 2 /* in sectors */
+#define MB 1024 * KB
+#define GB 1024 * MB
 
+#define DM_ZFTL_VMA_COPY_TEST 0
+#define DM_ZFTL_RECLAIM_ENABLE 1
+#define DM_ZFTL_RECLAIM_THRESHOLD 10
+#define DM_ZFTL_RECLAIM_INTERVAL 200 * MB
+#define DM_ZFTL_RECLAIM_DEBUG 1
+
+
+#define DM_ZFTL_DEV_STR(dev) dm_zftl_is_cache(dev) ? "Cache" : "ZNS"
+#define DM_ZFTL_RECLAIM_PERIOD	(1 * HZ)
 #define DM_ZFTL_FULL_THRESHOLD 0
 #define DM_ZFTL_UNMAPPED_PPA 0
+#define DM_ZFTL_UNMAPPED_LPA ~((unsigned int) 0)
 #define DM_ZFTL_READ_SPLIT 1
 #define DM_ZFTL_EXPOSE_TYPE BLK_ZONED_NONE
 #define DM_ZFTL_MAPPING_DEBUG 0
@@ -116,8 +129,17 @@ struct dm_zftl_io_work{
     spinlock_t lock_;
 };
 
+struct dm_zftl_reclaim_read_work{
+    struct delayed_work work;
+    struct dm_zftl_target * target;
+};
+
+
 
 struct dm_zftl_target {
+    unsigned int total_write_traffic_sec_;
+    unsigned int last_write_traffic_;
+
     /* For cloned BIOs to conventional zones */
     struct bio_set		bio_set;
     struct dm_zftl_mapping_table *mapping_table;
@@ -126,6 +148,15 @@ struct dm_zftl_target {
     sector_t capacity_nr_sectors;
     struct workqueue_struct *io_wq;
     struct dm_io_client *io_client; /* Client memory pool*/
+    struct copy_buffer *buffer;
+
+    struct workqueue_struct *reclaim_read_wq;
+
+    struct workqueue_struct *reclaim_write_wq;
+    struct workqueue_struct *gc_read_wq;
+    struct workqueue_struct *gc_write_wq;
+
+    struct dm_zftl_reclaim_read_work *reclaim_work;
 };
 
 
@@ -139,6 +170,38 @@ enum {
     DM_ZFTL_BACKEND,
     DM_ZFTL_CACHE,
 };
+
+struct copy_buffer {
+    void * buffer;
+    unsigned int * lpn_buffer;
+    unsigned int nr_blocks;
+};
+
+sector_t dm_zftl_get_dev_addr(struct dm_zftl_target * dm_zftl, sector_t ppa);
+int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_table,unsigned int * lpn_array,sector_t ppn,unsigned int nr_block);
+void dm_zftl_reclaim_read_work(struct work_struct *work);
+unsigned int dm_zftl_get_reclaim_zone(struct zoned_dev * dev);
+void * dm_zftl_init_copy_buffer(struct dm_zftl_target * dm_zftl);
+void * dm_zftl_get_buffer_block_addr(struct dm_zftl_target * dm_zftl, unsigned int idx);
+int dm_zftl_async_dm_io(unsigned int num_regions, struct dm_io_region *where, int rw, void *data, unsigned long *error_bits);
+sector_t dm_zftl_get_zone_start_vppn(struct zoned_dev * dev, unsigned int zone_id);
+int dm_zftl_ppn_is_valid(struct dm_zftl_mapping_table * mapping_table, sector_t ppn);
+void dm_zftl_copy_read_cb(unsigned long error, void * context);
+
+
+struct copy_job {
+    unsigned int reclaim_zone_id;
+    unsigned int nr_blocks;
+    unsigned int nr_read_complete;
+    int read_complete;
+    struct zoned_dev * copy_from;
+    struct zoned_dev * writeback_to;
+    struct dm_zftl_target * dm_zftl;
+    struct work_struct work;
+    spinlock_t lock_;
+};
+int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_job * job);
+int dm_zftl_read_valid_zone_data_to_buffer(struct dm_zftl_target * dm_zftl, struct copy_job * cp_job, unsigned int zone_id);
 
 
 struct zoned_dev {
@@ -198,9 +261,9 @@ int dm_zftl_init_bitmap(struct dm_zftl_target * dm_zftl);
 
 
 
-
+struct zoned_dev * dm_zftl_get_background_io_dev(struct dm_zftl_target * dm_zftl);
 struct zoned_dev * dm_zftl_get_foregound_io_dev(struct dm_zftl_target * dm_zftl);
-sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, struct bio * bio);
+sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, sector_t len);
 int dm_zftl_open_new_zone(struct zoned_dev * dev);
 int dm_zftl_reset_all(struct zoned_dev * dev);
 int dm_zftl_reset_zone(struct zoned_dev * dev, struct zone_info *zone);
@@ -208,14 +271,6 @@ void dm_zftl_zone_close(struct zoned_dev * dev, unsigned int zone_id);
 int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio);
 
 
-//TODO:Write back
-//TODO:Reclaiming
-struct dm_zftl_kcopy_job {
-    int nr_blocks;
-    struct page
-
-
-};
 //use delay_work => trigger write_back when reach threshold
 //1) block all incoming write io & wait all current write io done
 //2) copy valid data to zns
@@ -224,5 +279,7 @@ struct dm_zftl_kcopy_job {
 // p2l->mapping
 // page_list->
 //
-
+unsigned int dm_zftl_get_ppa_zone_id(struct dm_zftl_target * dm_zftl, sector_t ppa);
+struct zoned_dev * dm_zftl_get_ppa_dev(struct dm_zftl_target * dm_zftl, sector_t ppa);
+void dm_zftl_write_back_(struct work_struct *work);
 #endif //DM_ZFTL_DM_ZFTL_H
