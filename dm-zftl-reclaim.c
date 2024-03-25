@@ -146,6 +146,7 @@ void dm_zftl_copy_read_cb(unsigned long error, void * context){
         );
 #endif
         INIT_WORK(&job->work, dm_zftl_write_back_);
+        //once all vaild block read to VMA, kick off write
         queue_work(job->dm_zftl->reclaim_write_wq, &job->work);
     }
 }
@@ -258,18 +259,23 @@ int dm_zftl_read_valid_zone_data_to_buffer(struct dm_zftl_target * dm_zftl, stru
     unsigned int i;
     unsigned int current_lpn_buffer_idx = 0;
     unsigned int lp;
+    //Find all vaild blocks in reclaim zone
     for(i = start_ppn; i < end_ppn; ++i){
+
         if(dm_zftl_ppn_is_valid(mapping_table, i)){
             lp = mapping_table->p2l_table[i];
             if(lp == DM_ZFTL_UNMAPPED_LPA){
                 printk(KERN_EMERG "Unmapped LPA");
                 return 1;
             }
+
             dm_zftl->buffer->lpn_buffer[current_lpn_buffer_idx] = lp;
             current_lpn_buffer_idx++;
         }
+
     }
 
+    //no vaild blocks TODO:?
     if(current_lpn_buffer_idx == 0)
         return 0;
 
@@ -281,7 +287,7 @@ int dm_zftl_read_valid_zone_data_to_buffer(struct dm_zftl_target * dm_zftl, stru
          NULL);
 
 
-    //Maybe error?
+    //Maybe error? Check lpn order & corresponding ppn correct
     int pre_lpn = -1;
     for(i = 0; i < current_lpn_buffer_idx; ++i){
         if(((int)dm_zftl->buffer->lpn_buffer[i] > pre_lpn) &&
@@ -322,7 +328,6 @@ int dm_zftl_read_valid_zone_data_to_buffer(struct dm_zftl_target * dm_zftl, stru
         lpn = dm_zftl->buffer->lpn_buffer[i];
 
         where[i].bdev = dev->bdev;
-        //mapping_table->l2p_table[lpn] is 4K -gran
         where[i].sector = dm_zftl_get_dev_addr(dm_zftl, dmz_blk2sect(mapping_table->l2p_table[lpn]));
         where[i].count = dmz_blk2sect(1);
 
