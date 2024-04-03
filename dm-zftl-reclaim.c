@@ -30,6 +30,7 @@ int dm_zftl_need_reclaim(struct dm_zftl_target * dm_zftl){
         dm_zftl->last_write_traffic_ = 0;
         return 1;
     }
+
     return 0;
 }
 
@@ -366,18 +367,22 @@ int dm_zftl_read_valid_zone_data_to_buffer(struct dm_zftl_target * dm_zftl, stru
 
 unsigned int dm_zftl_get_reclaim_zone(struct zoned_dev * dev){
     if(dm_zftl_is_cache(dev)){
+        struct zone_link_entry reclaim_zone;
         unsigned int reclaim_zone_id = 0;
         int ret;
-        ret = kfifo_out(dev->write_fifo, &reclaim_zone_id, sizeof(unsigned int));
+        ret = kfifo_out(dev->write_fifo, &reclaim_zone, sizeof(struct zone_link_entry));
         if (!ret){
 #if DM_ZFTL_DEBUG
             printk(KERN_EMERG "Device:%s have not full zone"
             , dm_zftl_is_cache(dev) ? "Cache" : "ZNS");
 #endif
             reclaim_zone_id = 0;
+            return 0;
         }
+
+        reclaim_zone_id = reclaim_zone.id;
         atomic_dec(&dev->zoned_metadata->nr_full_zone);
-#if DM_ZFTL_DEBUG
+#if DM_ZFTL_RECLAIM_DEBUG
         printk(KERN_EMERG "Reclaim zone => Device:%s Id:%llu Range: [%llu, %llu](blocks)"
             , dm_zftl_is_cache(dev) ? "Cache" : "ZNS"
             , reclaim_zone_id

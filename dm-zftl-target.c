@@ -858,7 +858,7 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     dmz->io_client = dm_io_client_create();
 
 
-    ret = kfifo_alloc(dmz->cache_device->write_fifo, sizeof(unsigned int) * dmz->cache_device->nr_zones, GFP_KERNEL);
+    ret = kfifo_alloc(dmz->cache_device->write_fifo, sizeof(struct zone_link_entry) * dmz->cache_device->nr_zones, GFP_KERNEL);
     if (ret) {
         ti->error = "kfifo_alloc fail\n";
         ret = -ENOMEM;
@@ -906,8 +906,8 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     ti->per_io_data_size = sizeof(struct dm_zftl_io_work);
     ti->flush_supported = true;
     ti->discards_supported = false;
-    /* The exposed capacity is the number of chunks that can be mapped */
-    ti->len = dmz->capacity_nr_sectors;
+    /* The exposed capacity is the zone device capicity*/
+    ti->len = dmz->zone_device->capacity_nr_sectors;
 
     return 0;
     err_map:
@@ -1024,13 +1024,14 @@ int dm_zftl_reset_zone(struct zoned_dev * dev, struct zone_info *zone)
 
 void dm_zftl_zone_close(struct zoned_dev * dev, unsigned int zone_id){
     struct zone_link_entry *zone_link = kzalloc(sizeof(struct  zone_link_entry), GFP_KERNEL);
+    int ret;
     zone_link->id = zone_id;
     list_add(&zone_link->link, &dev->zoned_metadata->full_zoned);
     dev->zoned_metadata->opened_zoned = NULL;
     atomic_inc(&dev->zoned_metadata->nr_full_zone);
 
     if(dm_zftl_is_cache(dev)){
-        ret = kfifo_in(dev->write_fifo, &zone_id, sizeof(unsigned int));
+        ret = kfifo_in(dev->write_fifo, zone_link, sizeof(struct zone_link_entry));
         if (!ret) {
             printk(KERN_ERR "[ZONE CLOSE]: fifo is full\n");
         }
