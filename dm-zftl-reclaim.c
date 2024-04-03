@@ -246,8 +246,8 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
 
     struct zone_link_entry * zone_link = (struct zone_link_entry *)vmalloc(sizeof (struct zone_link_entry));
     zone_link->id = reclaim_zone->id;
-    list_add(&zone_link->link, &dev->zoned_metadata->free_zoned);
-    atomic_inc(&dev->zoned_metadata->nr_free_zone);
+    list_add(&zone_link->link, &job->copy_from->zoned_metadata->free_zoned);
+    atomic_inc(&job->copy_from->zoned_metadata->nr_free_zone);
 
     atomic_dec(&dm_zftl->nr_reclaim_work);
 
@@ -370,7 +370,7 @@ unsigned int dm_zftl_get_reclaim_zone(struct zoned_dev * dev){
         struct zone_link_entry reclaim_zone;
         unsigned int reclaim_zone_id = 0;
         int ret;
-        ret = kfifo_out(dev->write_fifo, &reclaim_zone, sizeof(struct zone_link_entry));
+        ret = kfifo_out(&dev->write_fifo, &reclaim_zone, sizeof(struct zone_link_entry));
         if (!ret){
 #if DM_ZFTL_DEBUG
             printk(KERN_EMERG "Device:%s have not full zone"

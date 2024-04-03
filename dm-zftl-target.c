@@ -858,7 +858,7 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     dmz->io_client = dm_io_client_create();
 
 
-    ret = kfifo_alloc(dmz->cache_device->write_fifo, sizeof(struct zone_link_entry) * dmz->cache_device->nr_zones, GFP_KERNEL);
+    ret = kfifo_alloc(&dmz->cache_device->write_fifo, sizeof(struct zone_link_entry) * dmz->cache_device->nr_zones, GFP_KERNEL);
     if (ret) {
         ti->error = "kfifo_alloc fail\n";
         ret = -ENOMEM;
@@ -988,10 +988,10 @@ int dm_zftl_reset_all(struct zoned_dev * dev){
 
 struct zoned_dev * dm_zftl_get_foregound_io_dev(struct dm_zftl_target * dm_zftl){
     /* Do we need this ? */
-    if(atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_free_zone) <= DM_ZFTL_FULL_THRESHOLD){
-        printk(KERN_EMERG "Cache dev full. Now foregound io switch to ZNS");
-        return dm_zftl->zone_device;
-    }
+//    if(atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_free_zone) <= DM_ZFTL_FULL_THRESHOLD){
+//        printk(KERN_EMERG "Cache dev full. Now foregound io switch to ZNS");
+//        return dm_zftl->zone_device;
+//    }
     return dm_zftl->cache_device;
 }
 
@@ -1031,7 +1031,7 @@ void dm_zftl_zone_close(struct zoned_dev * dev, unsigned int zone_id){
     atomic_inc(&dev->zoned_metadata->nr_full_zone);
 
     if(dm_zftl_is_cache(dev)){
-        ret = kfifo_in(dev->write_fifo, zone_link, sizeof(struct zone_link_entry));
+        ret = kfifo_in(&dev->write_fifo, zone_link, sizeof(struct zone_link_entry));
         if (!ret) {
             printk(KERN_ERR "[ZONE CLOSE]: fifo is full\n");
         }

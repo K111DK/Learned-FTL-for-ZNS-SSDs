@@ -153,7 +153,7 @@ struct dm_zftl_target {
 
     struct workqueue_struct *reclaim_read_wq;
     atomic_t nr_reclaim_work;
-    atomic max_reclaim_read_work;
+    atomic_t max_reclaim_read_work;
     struct workqueue_struct *reclaim_write_wq;
     struct workqueue_struct *gc_read_wq;
     struct workqueue_struct *gc_write_wq;
@@ -180,7 +180,7 @@ struct copy_buffer {
     unsigned int * lpn_buffer;
     unsigned int nr_blocks;
 };
-
+void dm_zftl_do_foreground_reclaim(struct work_struct *work);
 sector_t dm_zftl_get_dev_addr(struct dm_zftl_target * dm_zftl, sector_t ppa);
 int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_table,unsigned int * lpn_array,sector_t ppn,unsigned int nr_block);
 void dm_zftl_reclaim_read_work(struct work_struct *work);
