@@ -34,6 +34,7 @@
 #include <linux/version.h>
 #include <linux/pid.h>
 #include <linux/jhash.h>
+#include <linux/kfifo.h>
 
 #define KB 2 /* in sectors */
 #define MB 1024 * KB
@@ -44,7 +45,7 @@
 #define DM_ZFTL_RECLAIM_THRESHOLD 10
 #define DM_ZFTL_RECLAIM_INTERVAL 200 * MB
 #define DM_ZFTL_RECLAIM_DEBUG 1
-
+#define DM_ZFTL_RECLAIM_MAX_READ_NUM_DEFAULT 3
 
 #define DM_ZFTL_DEV_STR(dev) dm_zftl_is_cache(dev) ? "Cache" : "ZNS"
 #define DM_ZFTL_RECLAIM_PERIOD	(1 * HZ)
@@ -151,10 +152,13 @@ struct dm_zftl_target {
     struct copy_buffer *buffer;
 
     struct workqueue_struct *reclaim_read_wq;
-
+    atomic_t nr_reclaim_work;
+    atomic max_reclaim_read_work;
     struct workqueue_struct *reclaim_write_wq;
     struct workqueue_struct *gc_read_wq;
     struct workqueue_struct *gc_write_wq;
+
+
 
     struct dm_zftl_reclaim_read_work *reclaim_work;
 };
@@ -206,8 +210,7 @@ int dm_zftl_read_valid_zone_data_to_buffer(struct dm_zftl_target * dm_zftl, stru
 
 
 struct zoned_dev {
-
-
+    struct kfifo write_fifo;
 
     struct block_device	*bdev;
     struct dm_dev * dmdev;

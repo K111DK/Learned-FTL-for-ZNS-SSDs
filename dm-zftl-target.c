@@ -192,6 +192,9 @@ sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, sector_t len){
     }
 
     dm_zftl_zone_close(dev, opened_zone->id);
+
+
+
     ret = dm_zftl_open_new_zone(dev);
     if(ret){
         printk(KERN_EMERG "Error: Dev:%s can't alloc free zone",
@@ -202,11 +205,6 @@ sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, sector_t len){
     goto try_get_wp;
 
 }
-
-
-
-
-
 
 
 /*
@@ -848,7 +846,6 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
         ti->error = "create bio set failed";
         goto err_map;
     }
-
     ti->private = dmz;
 
     ret = dm_zftl_load_device(ti, argv);
@@ -859,6 +856,14 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     ret = dm_zftl_init_mapping_table(dmz);
     ret = dm_zftl_init_copy_buffer(dmz);
     dmz->io_client = dm_io_client_create();
+
+
+    ret = kfifo_alloc(dmz->cache_device->write_fifo, sizeof(unsigned int) * dmz->cache_device->nr_zones, GFP_KERNEL);
+    if (ret) {
+        ti->error = "kfifo_alloc fail\n";
+        ret = -ENOMEM;
+        goto err_dev;
+    }
 
     dmz->io_wq = alloc_workqueue("dm_zftl_foreground_io_wq", WQ_MEM_RECLAIM | WQ_UNBOUND, 0);
     if (!dmz->io_wq) {
@@ -873,6 +878,10 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
         ret = -ENOMEM;
         goto err_dev;
     }
+    atomic_set(&dmz->nr_reclaim_work, 0);
+    atomic_set(&dmz->max_reclaim_read_work, DM_ZFTL_RECLAIM_MAX_READ_NUM_DEFAULT);
+
+
 
     dmz->reclaim_read_wq = alloc_ordered_workqueue("dmz_zftl_rec", WQ_MEM_RECLAIM, 0);
     if (!dmz->reclaim_read_wq) {
@@ -885,9 +894,6 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     //dmz->reclaim_work->target = dmz;
     //INIT_DELAYED_WORK(&dmz->reclaim_work->work, dm_zftl_reclaim_read_work);
     //mod_delayed_work(dmz->reclaim_read_wq, &dmz->reclaim_work->work, DM_ZFTL_RECLAIM_PERIOD);
-
-
-
 
 
     dmz->last_write_traffic_ = 0;
@@ -931,8 +937,6 @@ static struct target_type dm_zftl_type = {
         .io_hints	 = dm_zftl_io_hints,
         .prepare_ioctl	 = dm_zftl_prepare_ioctl,
         .iterate_devices = dm_zftl_iterate_devices,
-
-
 };
 
 
@@ -983,8 +987,9 @@ int dm_zftl_reset_all(struct zoned_dev * dev){
 
 
 struct zoned_dev * dm_zftl_get_foregound_io_dev(struct dm_zftl_target * dm_zftl){
+    /* Do we need this ? */
     if(atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_free_zone) <= DM_ZFTL_FULL_THRESHOLD){
-        //printk(KERN_EMERG "Cache dev full. Now foregound io switch to ZNS");
+        printk(KERN_EMERG "Cache dev full. Now foregound io switch to ZNS");
         return dm_zftl->zone_device;
     }
     return dm_zftl->cache_device;
@@ -1023,6 +1028,13 @@ void dm_zftl_zone_close(struct zoned_dev * dev, unsigned int zone_id){
     list_add(&zone_link->link, &dev->zoned_metadata->full_zoned);
     dev->zoned_metadata->opened_zoned = NULL;
     atomic_inc(&dev->zoned_metadata->nr_full_zone);
+
+    if(dm_zftl_is_cache(dev)){
+        ret = kfifo_in(dev->write_fifo, &zone_id, sizeof(unsigned int));
+        if (!ret) {
+            printk(KERN_ERR "[ZONE CLOSE]: fifo is full\n");
+        }
+    }
 }
 
 static int __init dm_zftl_init(void)

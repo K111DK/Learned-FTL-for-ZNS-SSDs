@@ -9,15 +9,22 @@
 
 void dm_zftl_try_reclaim(struct dm_zftl_target * dm_zftl){
     if(dm_zftl_need_reclaim(dm_zftl)){
+
         printk(KERN_EMERG "Trigger reclaim");
+        atomic_inc(&dm_zftl->nr_reclaim_work);
+
         struct dm_zftl_reclaim_read_work * read_work = kmalloc(sizeof(struct dm_zftl_reclaim_read_work), GFP_NOIO);
-        INIT_WORK(&read_work->work, dm_zftl_do_reclaim);
+        INIT_WORK(&read_work->work, dm_zftl_do_foreground_reclaim);
         read_work->target = dm_zftl;
         queue_work(dm_zftl->reclaim_read_wq, &read_work->work);
+
     }
 }
 
 int dm_zftl_need_reclaim(struct dm_zftl_target * dm_zftl){
+    if(atomic_read(&dm_zftl->nr_reclaim_work) >= atomic_read(&dm_zftl->max_reclaim_read_work))
+        return 0;
+
     if(dm_zftl->last_write_traffic_ >= DM_ZFTL_RECLAIM_INTERVAL
         && DM_ZFTL_RECLAIM_ENABLE){
         dm_zftl->last_write_traffic_ = 0;
@@ -27,7 +34,7 @@ int dm_zftl_need_reclaim(struct dm_zftl_target * dm_zftl){
 }
 
 
-void dm_zftl_do_reclaim(struct work_struct *work){
+void dm_zftl_do_foreground_reclaim(struct work_struct *work){
     struct dm_zftl_reclaim_read_work * read_work = container_of(work, struct dm_zftl_reclaim_read_work, work);
     struct dm_zftl_target * dm_zftl = read_work->target;
 
@@ -231,6 +238,7 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
     printk(KERN_EMERG "[Reclaim Done] dev:%s zone:%llu",DM_ZFTL_DEV_STR(job->copy_from), job->reclaim_zone_id);
 #endif
 
+    //TODO:Fix metadata update and zone reset
     //dm_zftl_reset_zone(job->copy_from, reclaim_zone);
     job->writeback_to->zoned_metadata->opened_zoned->wp += nr_sectors;
     job->copy_from->zoned_metadata->zones[reclaim_zone->id].wp = 0;
@@ -239,6 +247,8 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
     zone_link->id = reclaim_zone->id;
     list_add(&zone_link->link, &dev->zoned_metadata->free_zoned);
     atomic_inc(&dev->zoned_metadata->nr_free_zone);
+
+    atomic_dec(&dm_zftl->nr_reclaim_work);
 
     dm_zftl_valid_data_writeback_cb(0, (void *)dm_zftl);
     return 1;
@@ -355,32 +365,57 @@ int dm_zftl_read_valid_zone_data_to_buffer(struct dm_zftl_target * dm_zftl, stru
 }
 
 unsigned int dm_zftl_get_reclaim_zone(struct zoned_dev * dev){
-    if(atomic_read(&dev->zoned_metadata->nr_full_zone) == 0) {
+    if(dm_zftl_is_cache(dev)){
+        unsigned int reclaim_zone_id = 0;
+        int ret;
+        ret = kfifo_out(dev->write_fifo, &reclaim_zone_id, sizeof(unsigned int));
+        if (!ret){
 #if DM_ZFTL_DEBUG
-        printk(KERN_EMERG "Device:%s have not full zone"
+            printk(KERN_EMERG "Device:%s have not full zone"
             , dm_zftl_is_cache(dev) ? "Cache" : "ZNS");
 #endif
-        return 0;
-    }
-    struct zone_link_entry *zone_link = NULL;
-    list_for_each_entry(zone_link, &dev->zoned_metadata->full_zoned, link){
-        if(zone_link)
-            goto FOUND;
-
-    }
-    return 0;
-
-    FOUND:
-    list_del(&zone_link->link);
-    atomic_dec(&dev->zoned_metadata->nr_full_zone);
-    dev->zoned_metadata->opened_zoned = &dev->zoned_metadata->zones[zone_link->id];
+            reclaim_zone_id = 0;
+        }
+        atomic_dec(&dev->zoned_metadata->nr_full_zone);
 #if DM_ZFTL_DEBUG
-    printk(KERN_EMERG "Reclaim zone => Device:%s Id:%llu Range: [%llu, %llu](blocks)"
+        printk(KERN_EMERG "Reclaim zone => Device:%s Id:%llu Range: [%llu, %llu](blocks)"
             , dm_zftl_is_cache(dev) ? "Cache" : "ZNS"
-            , zone_link->id
-            , zone_link->id * dev->zone_nr_blocks
-            , (zone_link->id + 1) * dev->zone_nr_blocks);
+            , reclaim_zone_id
+            , reclaim_zone_id * dev->zone_nr_blocks
+            , (reclaim_zone_id + 1) * dev->zone_nr_blocks);
     printk(KERN_EMERG "Remaing full zone:%d", atomic_read(&dev->zoned_metadata->nr_full_zone));
 #endif
-    return zone_link->id;
+        return reclaim_zone_id;
+    }
+
+//    if(atomic_read(&dev->zoned_metadata->nr_full_zone) == 0) {
+//#if DM_ZFTL_DEBUG
+//        printk(KERN_EMERG "Device:%s have not full zone"
+//            , dm_zftl_is_cache(dev) ? "Cache" : "ZNS");
+//#endif
+//        return 0;
+//    }
+//    struct zone_link_entry *zone_link = NULL;
+//    list_for_each_entry(zone_link, &dev->zoned_metadata->full_zoned, link){
+//        if(zone_link)
+//            goto FOUND;
+//
+//    }
+//    return 0;
+//
+//    FOUND:
+//    list_del(&zone_link->link);
+//    atomic_dec(&dev->zoned_metadata->nr_full_zone);
+//    //TODO:Is this neccesary?
+//    dev->zoned_metadata->opened_zoned = &dev->zoned_metadata->zones[zone_link->id];
+//#if DM_ZFTL_DEBUG
+//    printk(KERN_EMERG "Reclaim zone => Device:%s Id:%llu Range: [%llu, %llu](blocks)"
+//            , dm_zftl_is_cache(dev) ? "Cache" : "ZNS"
+//            , zone_link->id
+//            , zone_link->id * dev->zone_nr_blocks
+//            , (zone_link->id + 1) * dev->zone_nr_blocks);
+//    printk(KERN_EMERG "Remaing full zone:%d", atomic_read(&dev->zoned_metadata->nr_full_zone));
+//#endif
+//    return zone_link->id;
+    return 0;
 }
