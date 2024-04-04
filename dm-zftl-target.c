@@ -11,6 +11,37 @@
 #include <linux/bio.h>
 #include <linux/dm-ioctl.h>
 #include <linux/spinlock.h>
+
+
+unsigned int dm_zftl_l2p_get(struct dm_zftl_mapping_table * mapping_table, unsigned int lpn){
+    if(dm_zftl_lpn_is_in_cache(mapping_table, lpn)){
+        return mapping_table->l2p_table[lpn];
+    }else{
+        return lsm_tree_get_ppn(mapping_table->lsm_tree,
+                                lpn);
+    }
+}
+
+
+int dm_zftl_lpn_is_in_cache(struct dm_zftl_mapping_table * mapping_table, sector_t lpn){
+    if((mapping_table->device_bitmap[lpn / 8] & ((uint8_t) 1 << (lpn % 8))) == (uint8_t)0)
+        return 1;
+    return 0;
+}
+
+void dm_zftl_lpn_set_dev(struct dm_zftl_mapping_table * mapping_table, unsigned int lpn, int dev){
+    if(lpn >= mapping_table->l2p_table_sz)
+        return;
+    if(dev == DM_ZFTL_CACHE) {
+        mapping_table->device_bitmap[lpn / 8] &= (~((uint8_t) 1 << (lpn % 8)));
+        BUG_ON(!dm_zftl_lpn_is_in_cache(mapping_table, lpn));
+    }
+    else{
+        mapping_table->device_bitmap[lpn / 8] |= ((uint8_t) 1 << (lpn % 8));
+        BUG_ON(dm_zftl_lpn_is_in_cache(mapping_table, lpn));
+    }
+}
+
 void dm_zftl_invalidate_ppn(struct dm_zftl_mapping_table * mapping_table, sector_t ppn){
     mapping_table->validate_bitmap[ppn / 8] &=  (~((uint8_t) 1 << (ppn % 8)));
 }
@@ -86,8 +117,10 @@ int dm_zftl_iterate_devices(struct dm_target *ti,
     return r;
 }
 
-
 int dm_zftl_init_mapping_table(struct dm_zftl_target * dm_zftl){
+
+
+
     dm_zftl->mapping_table = (struct dm_zftl_mapping_table *)vmalloc(sizeof(struct dm_zftl_mapping_table));
     mutex_init(&dm_zftl->mapping_table->l2p_lock);
     dm_zftl->mapping_table->l2p_table_sz = dmz_sect2blk(dm_zftl->capacity_nr_sectors);
@@ -99,24 +132,28 @@ int dm_zftl_init_mapping_table(struct dm_zftl_target * dm_zftl){
                                                             sizeof(uint8_t), GFP_KERNEL | __GFP_ZERO);
     dm_zftl->mapping_table->validate_bitmap = kvmalloc_array( (dm_zftl->mapping_table->l2p_table_sz) / 8 + 1 ,
                                                             sizeof(uint8_t), GFP_KERNEL | __GFP_ZERO);
+    dm_zftl->mapping_table->lsm_tree = lsm_tree_init(dm_zftl->mapping_table->l2p_table_sz);
     unsigned int ppn, lpn, i;
     for(ppn = 0; ppn < dm_zftl->mapping_table->l2p_table_sz; ppn++){
         lpn = ppn;
         dm_zftl->mapping_table->l2p_table[lpn] = DM_ZFTL_UNMAPPED_PPA;
         dm_zftl->mapping_table->p2l_table[ppn] = DM_ZFTL_UNMAPPED_LPA;
         dm_zftl_invalidate_ppn(dm_zftl->mapping_table, ppn);
+        dm_zftl_lpn_set_dev(dm_zftl->mapping_table, lpn, DM_ZFTL_CACHE);
     }
     return 0;
 }
+
+
 
 sector_t dm_zftl_get(struct dm_zftl_mapping_table * mapping_table, sector_t lba){
     sector_t ppa;
     if((unsigned int)lba > mapping_table->l2p_table_sz){
         ppa = DM_ZFTL_UNMAPPED_PPA;
     }
-    int is_backend = mapping_table->device_bitmap[lba / 8] & ((uint8_t)(1) << (lba % 8));
-    ppa = mapping_table->l2p_table[dmz_sect2blk(lba)];
-    return dmz_blk2sect(ppa);
+    unsigned int lpn = dmz_sect2blk(lba);
+    unsigned int ppn = dm_zftl_l2p_get(mapping_table, lpn);
+    return dmz_blk2sect(ppn);
 }
 
 int dm_zftl_set_by_bn(struct dm_zftl_mapping_table * mapping_table, sector_t lpn, sector_t ppn){
@@ -146,22 +183,56 @@ int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_t
                                                     sector_t ppn,
                                                     unsigned int nr_block){
     unsigned int i = 0;
-    for(i = 0; i < nr_block; ++i){
 #if DM_ZFTL_MAPPING_DEBUG
-        printk(KERN_EMERG "L2P Update: LPN:%llu ==> PPN:%llu [%llu blocks]",
-           lpn_array[i],
-           ppn + i,
-           1);
+    printk(KERN_EMERG "L2P Update: LPN:%llu ==> PPN:%llu [%llu blocks]",
+            lpn_array[0],
+            ppn,
+            nr_block);
 #endif
-        dm_zftl_set_by_bn(mapping_table, lpn_array[i], ppn + i);
+
+    int buggy = 0;
+    //Change dev
+    for(i = 0; i < nr_block; ++i){
+        dm_zftl_lpn_set_dev(mapping_table, lpn_array[i], DM_ZFTL_BACKEND);
+        //dm_zftl_set_by_bn(mapping_table, lpn_array[i], ppn + i);
+        if(lpn_array[i]==131025)
+            buggy = 1;
     }
+
+//    if(buggy)
+//        lsm_tree_print_frame(&mapping_table->lsm_tree->frame[131025 / DM_ZFTL_FRAME_LENGTH]);
+
+    lsm_tree_update(mapping_table->lsm_tree,
+                    lpn_array,
+                    nr_block,
+                    ppn);
+
+    //Do insert check
+    int bug_on = 0;
+    for(i = 0; i < nr_block; ++i){
+        unsigned int cal_ppn = dmz_sect2blk(dm_zftl_get(mapping_table, dmz_blk2sect(lpn_array[i])));
+        if(cal_ppn != ppn + i){
+            printk(KERN_EMERG "Mapping ERR: LPN: %llu Get:%llu Expected:%llu",lpn_array[i], cal_ppn, ppn + i);
+            bug_on = 1;
+        }
+    }
+    if(!bug_on)
+        printk(KERN_EMERG "Mapping correct");
+
+//    if(buggy)
+//        lsm_tree_print_frame(&mapping_table->lsm_tree->frame[131025/ DM_ZFTL_FRAME_LENGTH]);
+
+    BUG_ON(bug_on);
+
+
     return 0;
 }
 
 
-int dm_zftl_update_mapping(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, sector_t nr_blocks){
+int dm_zftl_update_mapping_cache(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, sector_t nr_blocks){
     int i;
     for(i = 0; i < nr_blocks; ++i){
+        dm_zftl_lpn_set_dev(mapping_table, dmz_sect2blk(lba) + i, DM_ZFTL_CACHE);
         dm_zftl_set(mapping_table, lba + (sector_t)i * dmz_blk2sect(1) , ppa + (sector_t)i * dmz_blk2sect(1));
     }
 #if DM_ZFTL_MAPPING_DEBUG
@@ -355,7 +426,7 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
     where->sector = dm_zftl_get_dev_addr(dm_zftl, ppa);
     where->bdev = dev->bdev;
     where->count = dmz_blk2sect(dmz_bio_blocks(bio));
-    dm_zftl_update_mapping(dm_zftl->mapping_table,
+    dm_zftl_update_mapping_cache(dm_zftl->mapping_table,
                            start_sec,
                            start_ppa,
                            dmz_bio_blocks(bio));
@@ -388,64 +459,6 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
     dm_io(&iorq, 1, where, NULL);
     ret = DM_MAPIO_SUBMITTED;
 
-#if DM_ZFTL_VMA_COPY_TEST
-
-//Read from dev to VMA
-
-    ppa = dm_zftl_get(dm_zftl->mapping_table, start_sec); //get lpn's ppn
-    where->sector = dm_zftl_get_dev_addr(dm_zftl, ppa);  //get ppn's dev addr
-    where->bdev = dev->bdev;                             //dev
-    where->count = dmz_blk2sect(dmz_bio_blocks(bio));    //io length(sec)
-
-
-    iorq.bi_op = REQ_OP_READ;
-    iorq.bi_op_flags = 0;
-    iorq.mem.type = DM_IO_VMA;
-    iorq.mem.ptr.vma = dm_zftl_get_buffer_block_addr(dm_zftl, 0);
-    iorq.notify.fn = 0;
-    iorq.notify.context = 0;
-    iorq.client = dm_zftl->io_client;
-    ret = dm_io(&iorq, 1, where, NULL);
-
-//Write from VMA to dev
-   start_sec = bio->bi_iter.bi_sector;
-   start_ppa = dm_zftl_get_seq_wp(dev, bio_sectors(bio));
-
-   addr2 = start_ppa;
-
-
-    if(start_ppa == DM_ZFTL_UNMAPPED_PPA){
-        ret = -EIO;
-        goto FINISH;
-    }
-
-    ppa = start_ppa;
-    dm_zftl_update_mapping(dm_zftl->mapping_table,
-                           start_sec,
-                           start_ppa,
-                           dmz_bio_blocks(bio));
-
-    where->sector = dm_zftl_get_dev_addr(dm_zftl, ppa);
-    where->bdev = dev->bdev;
-    where->count = dmz_blk2sect(dmz_bio_blocks(bio));
-
-    iorq.bi_op = REQ_OP_WRITE;
-    iorq.bi_op_flags = 0;
-    iorq.mem.type = DM_IO_VMA;
-    iorq.mem.ptr.vma = dm_zftl_get_buffer_block_addr(dm_zftl, 0);
-    iorq.notify.fn = 0;
-    iorq.notify.context = 0;
-    iorq.client = dm_zftl->io_client;
-    ret = dm_io(&iorq, 1, where, NULL);
-
-    dev->zoned_metadata->opened_zoned->wp += dmz_blk2sect(dmz_bio_blocks(bio));
-
-//    printk(KERN_EMERG "[Write] Logic:%llu => Phys1:%llu => Phys2:%llu",
-//            desire * 512,
-//            addr1,
-//            addr2);
-
-#endif
 
     FINISH:
     dm_zftl_io_complete(bio);

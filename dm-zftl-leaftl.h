@@ -21,7 +21,7 @@
 
 
 #define MALLOC(size) vmalloc(size)
-#define FREE(mem) kfree(mem)
+#define FREE(mem) vfree(mem)
 #define MALLOC_ARRAY(num, size) kvmalloc_array(num, size, GFP_KERNEL | __GFP_ZERO)
 #define DM_ZFTL_FRAME_LENGTH 256
 #define DM_ZFTL_FRAME_LENGTH_BITS (DM_ZFTL_FRAME_LENGTH / 8)
@@ -209,5 +209,5 @@ unsigned int lsm_tree_get_level_size__(struct lsm_tree_level * level);
 unsigned int lsm_tree_get_seg_size__(struct segment * seg);
 
 
-
+void lsm_tree_print_frame(struct lsm_tree_frame * frame);
 #endif //LEAFTL_DM_ZFTL_LEAFTL_H

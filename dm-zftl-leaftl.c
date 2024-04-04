@@ -276,6 +276,7 @@ int lsm_tree_try_merge_seg_(struct segment *origin_seg,
     } MERGE_STATE;
 
     int ret = PUSH_DOWN;
+    return ret;
 
 
     if(!(seg_start(insert_seg) >= seg_start(origin_seg) &&
@@ -416,18 +417,21 @@ unsigned int lsm_tree_cal_ppn_original__(struct segment * seg,
 void lsm_tree_update(struct lsm_tree * lsm_tree, unsigned int * lpn_array, int len, unsigned int start_ppn){
     int i = 0;
     int pre_index = 0;
+    struct segment * segs;
     unsigned int wp = start_ppn;
     unsigned int pre_frame = lpn_array[0] / DM_ZFTL_FRAME_LENGTH;
     for(i = 0; i < len; ++i){
         unsigned int curr_frame = lpn_array[i] / DM_ZFTL_FRAME_LENGTH;
         if(curr_frame != pre_frame) {
-            lsm_tree_insert(Regression(lpn_array + pre_index, i - pre_index, wp),
+            segs = Regression(lpn_array + pre_index, i - pre_index, wp);
+            lsm_tree_insert(segs,
                             lsm_tree);
             wp += i - pre_index;
             pre_index = i;
         }
     }
-    lsm_tree_insert(Regression(lpn_array + pre_index, i - pre_index, wp),
+    segs = Regression(lpn_array + pre_index, i - pre_index, wp);
+    lsm_tree_insert(segs,
                     lsm_tree);
 }
 
@@ -1135,7 +1139,32 @@ point get_intersection(line s0, line s1){
 }
 #endif
 
-
+void lsm_tree_print_frame(struct lsm_tree_frame * frame){
+    if(!frame)
+        return;
+    if(!frame->level)
+        return;
+    struct segment * seg;
+    struct lsm_tree_level * level = frame->level;
+    int l_index = 0;
+    while(level){
+        seg = level->seg;
+        printk(KERN_EMERG "\n<level %d>\n", l_index);
+        while(seg){
+            if(seg->is_acc_seg) {
+                printk(KERN_EMERG
+                "\n[%llu %llu  <%llu>acc]\n", seg_start(seg), seg_end(seg), seg->intercept);
+            }
+            else{
+                printk(KERN_EMERG
+                "\n[%llu %llu  <%llu>appro]\n", seg_start(seg), seg_end(seg), seg->intercept);
+            }
+            seg = seg->next;
+        }
+        l_index++;
+        level = level->next_level;
+    }
+}
 
 #ifdef __cplusplus
 }

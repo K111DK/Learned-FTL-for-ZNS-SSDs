@@ -4,6 +4,8 @@
 
 #ifndef DM_ZFTL_DM_ZFTL_H
 #define DM_ZFTL_DM_ZFTL_H
+#include "dm-zftl-leaftl.h"
+
 
 #include <linux/types.h>
 #include <linux/blkdev.h>
@@ -35,6 +37,7 @@
 #include <linux/pid.h>
 #include <linux/jhash.h>
 #include <linux/kfifo.h>
+#include <linux/kernel.h>
 
 #define KB 2 /* in sectors */
 #define MB 1024 * KB
@@ -44,7 +47,7 @@
 #define DM_ZFTL_RECLAIM_ENABLE 1
 #define DM_ZFTL_RECLAIM_THRESHOLD 10
 #define DM_ZFTL_RECLAIM_INTERVAL 200 * MB
-#define DM_ZFTL_RECLAIM_DEBUG 1
+#define DM_ZFTL_RECLAIM_DEBUG 0
 #define DM_ZFTL_RECLAIM_MAX_READ_NUM_DEFAULT 3
 
 #define DM_ZFTL_DEV_STR(dev) dm_zftl_is_cache(dev) ? "Cache" : "ZNS"
@@ -93,6 +96,8 @@ enum {
 
 
 struct dm_zftl_mapping_table{
+    struct lsm_tree * lsm_tree;
+
     unsigned int l2p_table_sz; // in blocks
     uint32_t * l2p_table; // all unmapped lba will be mapped to 0 (which is metadata zoned)
     uint32_t * p2l_table;
@@ -100,8 +105,9 @@ struct dm_zftl_mapping_table{
     uint8_t * validate_bitmap;
     struct mutex l2p_lock;
 };
-
-
+unsigned int dm_zftl_l2p_get(struct dm_zftl_mapping_table * mapping_table, unsigned int lpn);
+int dm_zftl_lpn_is_in_cache(struct dm_zftl_mapping_table * mapping_table, sector_t lpn);
+void dm_zftl_lpn_set_dev(struct dm_zftl_mapping_table * mapping_table, unsigned int lpn, int dev);
 //int dm_zftl_init_mapping_table(struct dm_zftl_target * dm_zftl);
 //sector_t dm_zftl_get(struct dm_zftl_mapping_table * mapping_table, sector_t lba);
 //int dm_zftl_set(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa);

@@ -10,7 +10,7 @@
 void dm_zftl_try_reclaim(struct dm_zftl_target * dm_zftl){
     if(dm_zftl_need_reclaim(dm_zftl)){
 
-        printk(KERN_EMERG "Trigger reclaim");
+        //printk(KERN_EMERG "Trigger reclaim");
         atomic_inc(&dm_zftl->nr_reclaim_work);
 
         struct dm_zftl_reclaim_read_work * read_work = kmalloc(sizeof(struct dm_zftl_reclaim_read_work), GFP_NOIO);
@@ -204,6 +204,7 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
     where->count = nr_sectors;
 
 
+    //TODO:change mapping
     dm_zftl_update_mapping_by_lpn_array(dm_zftl->mapping_table,
                                         dm_zftl->buffer->lpn_buffer,
                                         dmz_sect2blk(start_ppa),
