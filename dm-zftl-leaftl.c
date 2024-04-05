@@ -154,12 +154,15 @@ struct segment * lsm_tree_insert_seg_to_level_(struct segment *insert_seg,
     //Only one seg in level
     if(curr == NULL){
         if(lsm_tree_is_seg_overlap_(prev, insert_seg)){
-            int need_push_down = lsm_tree_try_merge_seg_(prev, insert_seg);
-            if(need_push_down){
+            int merge_state = lsm_tree_try_merge_seg_(prev, insert_seg);
+            if(merge_state == PUSH_DOWN || merge_state == DEL_SEG){
                 level->seg = insert_seg;
                 insert_seg->next = NULL;
                 prev->next = NULL;
-                return prev;
+                if(merge_state == PUSH_DOWN)
+                    return prev;
+                else
+                    FREE(prev);
             }
         }
         prev->next = insert_seg;
@@ -177,8 +180,9 @@ struct segment * lsm_tree_insert_seg_to_level_(struct segment *insert_seg,
 
         if(lsm_tree_is_seg_overlap_(curr, insert_seg)){
 
-            int need_push_down = lsm_tree_try_merge_seg_(curr, insert_seg);
-            if(need_push_down){
+            //TODO:seg of SAME_LEVEL suppose to be deleted(?)
+            int merge_state = lsm_tree_try_merge_seg_(curr, insert_seg);
+            if(merge_state == PUSH_DOWN || merge_state == DEL_SEG){
                 // Detach segment
                 //
                 //   (prev) --> curr     --> next
@@ -196,7 +200,11 @@ struct segment * lsm_tree_insert_seg_to_level_(struct segment *insert_seg,
                 }
 
                 detach_seg->next = NULL;
-                list_tail_add(overlap_seg_list, detach_seg);
+
+                if (merge_state == PUSH_DOWN)
+                    list_tail_add(overlap_seg_list, detach_seg);
+                else
+                    FREE(detach_seg);
 
                 continue;
             }
@@ -270,40 +278,23 @@ void lsm_tree_quick_insert_(struct lsm_tree_level * level, struct segment *inser
  * */
 int lsm_tree_try_merge_seg_(struct segment *origin_seg,
                                            struct segment *insert_seg){
-    enum {
-        SAME_LEVEL = 0,
-        PUSH_DOWN = 1
-    } MERGE_STATE;
 
-    int ret = PUSH_DOWN;
-    return ret;
+    if(seg_start(insert_seg) <= seg_start(origin_seg) &&
+       seg_end(insert_seg) >= seg_end(origin_seg) && insert_seg->is_acc_seg)
+        return DEL_SEG;
 
-
-    if(!(seg_start(insert_seg) >= seg_start(origin_seg) &&
-       seg_end(insert_seg) <= seg_end(origin_seg))){
-
-
-
-        if(seg_start(insert_seg) <= seg_start(origin_seg) &&
-             seg_end(insert_seg) >= seg_end(origin_seg)){
-            if(insert_seg->is_acc_seg){
-                ret = SAME_LEVEL;
-            }
-        }else{
-            if(insert_seg->is_acc_seg && origin_seg->is_acc_seg){
-                if(seg_start(origin_seg) <= seg_start(insert_seg) && seg_end(origin_seg) >= seg_start(insert_seg)){
-                    origin_seg->len -= (seg_end(origin_seg) - seg_start(insert_seg) + 1);
-                    ret = SAME_LEVEL;
-                }else if(seg_start(origin_seg) >= seg_start(insert_seg) && seg_start(origin_seg) <= seg_end(insert_seg)){
-                    origin_seg->len -= (seg_end(insert_seg) - seg_start(origin_seg) + 1);
-                    origin_seg->start_lpn = seg_end(origin_seg) + 1;
-                    ret =  SAME_LEVEL;
-                }
-            }
+    if(insert_seg->is_acc_seg && origin_seg->is_acc_seg){
+        if(seg_start(origin_seg) <= seg_start(insert_seg) && seg_end(origin_seg) >= seg_start(insert_seg)){
+            origin_seg->len -= (seg_end(origin_seg) - seg_start(insert_seg) + 1);
+            return SAME_LEVEL;
+        }else if(seg_start(origin_seg) >= seg_start(insert_seg) && seg_start(origin_seg) <= seg_end(insert_seg)){
+            origin_seg->len -= (seg_end(insert_seg) - seg_start(origin_seg) + 1);
+            origin_seg->start_lpn = seg_end(origin_seg) + 1;
+            return  SAME_LEVEL;
         }
     }
 
-    return ret;
+    return PUSH_DOWN;
 }
 
 // In original LeaFTL, f(lpn) = ppn, ppn may not correct, we need to do local search in [ppn - ε, ppn + ε]

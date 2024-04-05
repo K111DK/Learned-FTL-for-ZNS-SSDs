@@ -28,6 +28,13 @@
 #define DM_ZFTL_SEG_STRING(seg) ""
 #define DM_ZFTL_FP_EMU  1
 #endif
+
+enum {
+    SAME_LEVEL = 0,
+    PUSH_DOWN = 1,
+    DEL_SEG = 2
+};
+
 extern enum {
     FULLY_COVER,
     PARTIAL_COVER,

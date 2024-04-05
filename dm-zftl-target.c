@@ -199,8 +199,6 @@ int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_t
             buggy = 1;
     }
 
-//    if(buggy)
-//        lsm_tree_print_frame(&mapping_table->lsm_tree->frame[131025 / DM_ZFTL_FRAME_LENGTH]);
 
     lsm_tree_update(mapping_table->lsm_tree,
                     lpn_array,
@@ -216,11 +214,8 @@ int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_t
             bug_on = 1;
         }
     }
-    if(!bug_on)
-        printk(KERN_EMERG "Mapping correct");
-
-//    if(buggy)
-//        lsm_tree_print_frame(&mapping_table->lsm_tree->frame[131025/ DM_ZFTL_FRAME_LENGTH]);
+    if(bug_on)
+        printk(KERN_EMERG "Mapping Error";
 
     BUG_ON(bug_on);
 
