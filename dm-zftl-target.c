@@ -214,9 +214,9 @@ int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_t
             bug_on = 1;
         }
     }
-    if(bug_on)
-        printk(KERN_EMERG "Mapping Error";
-
+    if(bug_on){
+        printk(KERN_EMERG "Mapping Error");
+    }
     BUG_ON(bug_on);
 
 
@@ -934,6 +934,14 @@ static int dm_zftl_prepare_ioctl(struct dm_target *ti, struct block_device **bde
     return 0;
 }
 
+static void dm_zftl_status(struct dm_target *ti, status_type_t type,
+                       unsigned int status_flags, char *result,
+                       unsigned int maxlen){
+    int sz=0;
+    DMEMIT("<Dm-zftl>: status.......");
+    return;
+}
+
 static struct target_type dm_zftl_type = {
         .name		 = "zftl",
         .version	 = {1, 0, 0},
@@ -945,6 +953,7 @@ static struct target_type dm_zftl_type = {
         .io_hints	 = dm_zftl_io_hints,
         .prepare_ioctl	 = dm_zftl_prepare_ioctl,
         .iterate_devices = dm_zftl_iterate_devices,
+        .status = dm_zftl_status,
 };
 
 

@@ -285,7 +285,7 @@ void dm_zftl_try_reclaim(struct dm_zftl_target * dm_zftl);
 //use delay_work => trigger write_back when reach threshold
 //1) block all incoming write io & wait all current write io done
 //2) copy valid data to zns
-//3) update mapping
+//3) update mappings
 //4) unblock io
 // p2l->mapping
 // page_list->
