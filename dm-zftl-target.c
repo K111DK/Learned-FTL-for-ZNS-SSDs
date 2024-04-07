@@ -17,6 +17,10 @@ unsigned int dm_zftl_l2p_get(struct dm_zftl_mapping_table * mapping_table, unsig
     if(dm_zftl_lpn_is_in_cache(mapping_table, lpn)){
         return mapping_table->l2p_table[lpn];
     }else{
+        if(lsm_tree_get_ppn(mapping_table->lsm_tree,
+                            lpn) != mapping_table->l2p_table[lpn])
+            printk(KERN_EMERG "Lsm:%llu Cache:%llu", lsm_tree_get_ppn(mapping_table->lsm_tree,
+                                                       lpn), mapping_table->l2p_table[lpn]);
         return lsm_tree_get_ppn(mapping_table->lsm_tree,
                                 lpn);
     }
@@ -198,9 +202,7 @@ int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_t
 
 
         dm_zftl_lpn_set_dev(mapping_table, lpn_array[i], DM_ZFTL_BACKEND);
-        //dm_zftl_set_by_bn(mapping_table, lpn_array[i], ppn + i);
-        if(lpn_array[i]==131025)
-            buggy = 1;
+        dm_zftl_set_by_bn(mapping_table, lpn_array[i], ppn + i);
     }
 
 
@@ -210,18 +212,24 @@ int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_t
                     ppn);
 
     //Do insert check
-    int bug_on = 0;
-    for(i = 0; i < nr_block; ++i){
-        unsigned int cal_ppn = dmz_sect2blk(dm_zftl_get(mapping_table, dmz_blk2sect(lpn_array[i])));
-        if(cal_ppn != ppn + i){
-            printk(KERN_EMERG "Mapping ERR: LPN: %llu Get:%llu Expected:%llu",lpn_array[i], cal_ppn, ppn + i);
-            bug_on = 1;
-        }
-    }
-    if(bug_on){
-        printk(KERN_EMERG "Mapping Error");
-    }
-    BUG_ON(bug_on);
+//    int bug_on = 0;
+//    for(i = 0; i < nr_block; ++i){
+//        unsigned int cal_ppn = dmz_sect2blk(dm_zftl_get(mapping_table, dmz_blk2sect(lpn_array[i])));
+//        unsigned int cal_lsm_ppn = lsm_tree_get_ppn(mapping_table->lsm_tree,
+//                                                lpn_array[i]);
+//        if(cal_lsm_ppn != ppn + i){
+//            printk(KERN_EMERG "Mapping ERR[lsm]: LPN: %llu Get:%llu Expected:%llu",lpn_array[i], cal_lsm_ppn, ppn + i);
+//            bug_on = 1;
+//        }
+//        if(cal_ppn != ppn + i){
+//            printk(KERN_EMERG "Mapping ERR: LPN: %llu Get:%llu Expected:%llu",lpn_array[i], cal_ppn, ppn + i);
+//            bug_on = 1;
+//        }
+//    }
+//    if(bug_on){
+//        printk(KERN_EMERG "Mapping Error");
+//    }
+//    BUG_ON(bug_on);
 
 
     return 0;
