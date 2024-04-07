@@ -6,7 +6,6 @@ iodepth=32
 size=10G
 numjobs=1
 rw=randwrite
-continue_on_error=verify
 random_distribution=zipf:1.2
 filename=/dev/mapper/ZFTL
 do_verify=1

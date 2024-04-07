@@ -163,6 +163,8 @@ struct segment * lsm_tree_insert_seg_to_level_(struct segment *insert_seg,
     next_of_insert = NULL;
     prev = level->seg;
     curr = prev->next;
+    struct segment ** overlap_seg_list = MALLOC(sizeof(struct segment *));
+    *overlap_seg_list = NULL;
 
     //Only one seg in level
     if(curr == NULL){
@@ -172,22 +174,21 @@ struct segment * lsm_tree_insert_seg_to_level_(struct segment *insert_seg,
                 level->seg = insert_seg;
                 insert_seg->next = NULL;
                 prev->next = NULL;
-                if(merge_state == PUSH_DOWN)
+                if(merge_state == PUSH_DOWN){
                     return prev;
-                else
+                }else {
                     FREE(prev);
+                    return NULL;
+                }
             }
         }
-        prev->next = insert_seg;
-        insert_seg->next = NULL;
+        lsm_tree_quick_insert_(level, insert_seg);
         return NULL;
     }
 
 
     prev = NULL;
     curr = level->seg;
-    struct segment ** overlap_seg_list = MALLOC(sizeof(struct segment *));
-    *overlap_seg_list = NULL;
     struct segment * detach_seg;
     while(curr){
 
@@ -228,6 +229,7 @@ struct segment * lsm_tree_insert_seg_to_level_(struct segment *insert_seg,
         curr = curr->next;
     }
 
+    END:
     lsm_tree_quick_insert_(level, insert_seg);
     struct segment * overlap_segs = *overlap_seg_list;
     FREE(overlap_seg_list);
@@ -292,20 +294,20 @@ void lsm_tree_quick_insert_(struct lsm_tree_level * level, struct segment *inser
 int lsm_tree_try_merge_seg_(struct segment *origin_seg,
                                            struct segment *insert_seg){
 
-    if(seg_start(insert_seg) <= seg_start(origin_seg) &&
-       seg_end(insert_seg) >= seg_end(origin_seg) && insert_seg->is_acc_seg)
-        return DEL_SEG;
+//    if(seg_start(insert_seg) <= seg_start(origin_seg) &&
+//       seg_end(insert_seg) >= seg_end(origin_seg) && insert_seg->is_acc_seg)
+//        return DEL_SEG;
 
-    if(insert_seg->is_acc_seg && origin_seg->is_acc_seg){
-        if(seg_start(origin_seg) <= seg_start(insert_seg) && seg_end(origin_seg) >= seg_start(insert_seg)){
-            origin_seg->len -= (seg_end(origin_seg) - seg_start(insert_seg) + 1);
-            return SAME_LEVEL;
-        }else if(seg_start(origin_seg) >= seg_start(insert_seg) && seg_start(origin_seg) <= seg_end(insert_seg)){
-            origin_seg->len -= (seg_end(insert_seg) - seg_start(origin_seg) + 1);
-            origin_seg->start_lpn = seg_end(origin_seg) + 1;
-            return  SAME_LEVEL;
-        }
-    }
+//    if(insert_seg->is_acc_seg && origin_seg->is_acc_seg){
+//        if(seg_start(origin_seg) <= seg_start(insert_seg) && seg_end(origin_seg) >= seg_start(insert_seg)){
+//            origin_seg->len -= (seg_end(origin_seg) - seg_start(insert_seg) + 1);
+//            return SAME_LEVEL;
+//        }else if(seg_start(origin_seg) >= seg_start(insert_seg) && seg_start(origin_seg) <= seg_end(insert_seg)){
+//            origin_seg->len -= (seg_end(insert_seg) - seg_start(origin_seg) + 1);
+//            origin_seg->start_lpn = seg_end(origin_seg) + 1;
+//            return  SAME_LEVEL;
+//        }
+//    }
 
     return PUSH_DOWN;
 }

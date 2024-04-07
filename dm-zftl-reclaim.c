@@ -8,7 +8,7 @@
 
 
 void dm_zftl_lsm_tree_try_compact(struct dm_zftl_target * dm_zftl){
-    if(dm_zftl->last_compact_traffic_ >= DM_ZFTL_COMPACT_INTERVAL && DM_ZFTL_COMPACT_ENABLE){
+    if((dm_zftl->last_compact_traffic_ >= DM_ZFTL_COMPACT_INTERVAL) && DM_ZFTL_COMPACT_ENABLE){
 
 
 #if DM_ZFTL_COMPACT_DEBUG
@@ -69,8 +69,8 @@ void dm_zftl_foreground_reclaim(struct dm_zftl_target * dm_zftl){
 
 
 int dm_zftl_need_reclaim(struct dm_zftl_target * dm_zftl){
-    //if(atomic_read(&dm_zftl->nr_reclaim_work) >= atomic_read(&dm_zftl->max_reclaim_read_work))
-    //    return 0;
+    if(atomic_read(&dm_zftl->nr_reclaim_work) >= atomic_read(&dm_zftl->max_reclaim_read_work))
+        return 0;
     if(     (
                 dm_zftl->last_write_traffic_ >= DM_ZFTL_RECLAIM_INTERVAL ||
                 atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_free_zone) <= 5
