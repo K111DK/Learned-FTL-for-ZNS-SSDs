@@ -27,6 +27,12 @@
 #define DM_ZFTL_FRAME_LENGTH_BITS (DM_ZFTL_FRAME_LENGTH / 8)
 #define DM_ZFTL_SEG_STRING(seg) ""
 #define DM_ZFTL_FP_EMU  1
+#define DM_ZFTL_LOOK_UP_HIST_LEN 150
+#define DM_ZFTL_CONCURRENT_SUPPORT 1
+#if DM_ZFTL_CONCURRENT_SUPPORT
+#include <linux/spinlock.h>
+#include <linux/mutex.h>
+#endif
 #endif
 
 enum {
@@ -107,6 +113,9 @@ struct lsm_tree_level{
     unsigned int level_len;
     struct segment * seg;
     struct lsm_tree_level * next_level;
+#if DM_ZFTL_CONCURRENT_SUPPORT
+    spinlock_t _lock;
+#endif
 };
 
 struct lsm_tree_frame{
@@ -114,9 +123,15 @@ struct lsm_tree_frame{
     struct lsm_tree_level * level;
     unsigned int nr_level;
     unsigned int access_count;
+
+#if DM_ZFTL_CONCURRENT_SUPPORT
+    struct mutex _lock;
+#endif
+
 };
 
 struct lsm_tree{
+    unsigned int look_up_hist[DM_ZFTL_LOOK_UP_HIST_LEN];
     struct lsm_tree_frame * frame;
     unsigned int nr_frame;
 };
@@ -148,7 +163,7 @@ void lsm_tree_compact(struct lsm_tree * lsm_tree);
 void lsm_tree_frame_compact__(struct lsm_tree_frame * frame);
 void lsm_tree_promote(struct lsm_tree * lsm_tree);
 void lsm_tree_frame_promote__(struct lsm_tree_frame * frame);
-
+void lsm_tree_clean_empty_level__(struct lsm_tree_frame * frame);
 
 
 

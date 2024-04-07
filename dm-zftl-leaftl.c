@@ -51,11 +51,20 @@ struct lsm_tree * lsm_tree_init(unsigned int total_blocks){
     tree->frame = frame;
 
     unsigned int i;
+    for(i = 0; i < DM_ZFTL_LOOK_UP_HIST_LEN; ++i) {
+        tree->look_up_hist[i] = 0;
+    }
+
     for (i = 0; i < total_frame; ++i){
         frame[i].access_count = 0;
         frame[i].frame_no = i;
         frame[i].nr_level = 0;
         frame[i].level = NULL;
+
+#if DM_ZFTL_CONCURRENT_SUPPORT
+        mutex_init(&frame[i]._lock);
+#endif
+
     }
     return tree;
 }
@@ -82,17 +91,9 @@ void lsm_tree_insert(struct segment * seg, struct lsm_tree * lsm_tree){
 
     overlap_segs = lsm_tree_insert_segs_to_level_(seg, first_level);
      if(overlap_segs){
-        struct lsm_tree_level * second_level = first_level->next_level;
-        if(!second_level){
-            second_level = lsm_tree_insert_new_level_(frame, first_level);
-        }
-
-        overlap_segs = lsm_tree_insert_segs_to_level_(overlap_segs, second_level);
-        if(overlap_segs){
-            struct lsm_tree_level * new_level = lsm_tree_insert_new_level_(frame, second_level);
-            lsm_tree_insert_segs_to_level_(overlap_segs, new_level);
-        }
-
+         struct lsm_tree_level * new_level = lsm_tree_insert_new_level_(frame, first_level);
+         overlap_segs = lsm_tree_insert_segs_to_level_(overlap_segs, new_level);
+         BUG_ON(overlap_segs);
     }
 }
 
@@ -104,6 +105,12 @@ struct segment *lsm_tree_insert_segs_to_level_(struct segment *insert_segs,
     struct segment * overlap_segs_head;
     struct segment * overlap_segs_tail;
     struct segment * insert_seg = insert_segs;
+    unsigned int flags;
+
+#if DM_ZFTL_CONCURRENT_SUPPORT
+    if(level)
+        spin_lock_irqsave(&level->_lock, flags);
+#endif
 
     while(insert_seg) {
 
@@ -130,6 +137,12 @@ struct segment *lsm_tree_insert_segs_to_level_(struct segment *insert_segs,
 
         insert_seg = next;
     }
+
+#if DM_ZFTL_CONCURRENT_SUPPORT
+    if(level)
+        spin_unlock_irqrestore(&level->_lock, flags);
+#endif
+
     return overlap_head;
 }
 
@@ -317,17 +330,22 @@ unsigned int lsm_tree_get_ppn(struct lsm_tree * lsm_tree, unsigned int lpn){
         goto UNMAPPED;
     }
 
+    unsigned int look_up = 0;
     struct lsm_tree_frame * frame = &lsm_tree->frame[frame_no];
     struct lsm_tree_level * level = frame->level;
 
     while(level){
+        look_up++;
         target_segment = lsm_tree_search_level_(level, lpn);
 
         if(target_segment){
 
             if(target_segment->is_acc_seg){
                 ppn = lsm_tree_cal_ppn_(target_segment, lpn);
+
+                lsm_tree->look_up_hist[look_up] += 1;
                 return ppn;
+
             }else {
                 /*Check if this lpn really in this approximate segment*/
                 int lpn_offset_in_seg;
@@ -342,6 +360,7 @@ unsigned int lsm_tree_get_ppn(struct lsm_tree * lsm_tree, unsigned int lpn){
 #else
                     ppn = lsm_tree_cal_ppn_(target_segment, lpn);
 #endif
+                    lsm_tree->look_up_hist[look_up] += 1;
                     return ppn;
                 }
             }
@@ -569,26 +588,10 @@ void lsm_tree_compact(struct lsm_tree * lsm_tree){
         lsm_tree_frame_compact__(&lsm_tree->frame[i]);
 }
 
-/* Compact the lsm tree upside-down */
-void lsm_tree_frame_compact__(struct lsm_tree_frame * frame){
-    if(!frame)
-        return;
-    struct lsm_tree_level * level = frame->level;
-    if(!level)
-        return;
-    struct frame_valid_bitmap * upper_level_bm = get_level_bitmap(level);
-    struct frame_valid_bitmap * curr_level_bm;
-    while(level->next_level){
-        level = level->next_level;
-        lsm_tree_level_compact__(level, upper_level_bm);
-        FREE(upper_level_bm);
-        curr_level_bm = get_level_bitmap(level);
-        upper_level_bm = dm_zftl_bitmap_or(curr_level_bm, upper_level_bm);
-    }
 
-    //Remove empty levels
+void lsm_tree_clean_empty_level__(struct lsm_tree_frame * frame) {
     struct lsm_tree_level * pre_level = NULL;
-    level = frame->level;
+    struct lsm_tree_level * level = frame->level;
     while(level){
         if(!level->seg){
             if(level == frame->level){
@@ -605,6 +608,52 @@ void lsm_tree_frame_compact__(struct lsm_tree_frame * frame){
         pre_level = level;
         level = level->next_level;
     }
+}
+
+/* Compact the lsm tree upside-down */
+void lsm_tree_frame_compact__(struct lsm_tree_frame * frame){
+    if(!frame)
+        return;
+
+#if DM_ZFTL_CONCURRENT_SUPPORT
+    mutex_lock(&frame->_lock);
+#endif
+
+    struct lsm_tree_level * level = frame->level;
+    if(!level)
+        return;
+
+    unsigned int before_size = lsm_tree_get_frame_size__(frame);
+
+    struct frame_valid_bitmap * upper_level_bm = get_level_bitmap(level);
+    struct frame_valid_bitmap * curr_level_bm;
+    while(level->next_level){
+        level = level->next_level;
+        lsm_tree_level_compact__(level, upper_level_bm);
+        FREE(upper_level_bm);
+        curr_level_bm = get_level_bitmap(level);
+        upper_level_bm = dm_zftl_bitmap_or(curr_level_bm, upper_level_bm);
+    }
+
+    //Remove empty levels
+    lsm_tree_clean_empty_level__(frame);
+
+    unsigned int after_size = lsm_tree_get_frame_size__(frame);
+
+#if DM_ZFTL_COMPACT_DEBUG
+    if(after_size < before_size) {
+        printk(KERN_EMERG
+        "[Compact] Frame:%llu Before:%llu B  After:%lluB"
+                , frame->frame_no
+                , before_size
+                , after_size);
+    }
+#endif
+
+#if DM_ZFTL_CONCURRENT_SUPPORT
+    mutex_unlock(&frame->_lock);
+#endif
+
 }
 
 void lsm_tree_level_compact__(struct lsm_tree_level * level, struct frame_valid_bitmap * bm){
@@ -674,6 +723,11 @@ struct lsm_tree_level *lsm_tree_insert_new_level_(struct lsm_tree_frame * frame,
     level->next_level = NULL;
     level->seg = NULL;
     level->level_len = 0;
+
+#if DM_ZFTL_CONCURRENT_SUPPORT
+    spin_lock_init(&level->_lock);
+#endif
+
     if(!curr_level){
         frame->level = level;
         level->next_level = NULL;

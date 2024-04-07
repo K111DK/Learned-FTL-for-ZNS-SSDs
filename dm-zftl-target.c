@@ -141,6 +141,8 @@ int dm_zftl_init_mapping_table(struct dm_zftl_target * dm_zftl){
         dm_zftl_invalidate_ppn(dm_zftl->mapping_table, ppn);
         dm_zftl_lpn_set_dev(dm_zftl->mapping_table, lpn, DM_ZFTL_CACHE);
     }
+
+
     return 0;
 }
 
@@ -193,6 +195,8 @@ int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_t
     int buggy = 0;
     //Change dev
     for(i = 0; i < nr_block; ++i){
+
+
         dm_zftl_lpn_set_dev(mapping_table, lpn_array[i], DM_ZFTL_BACKEND);
         //dm_zftl_set_by_bn(mapping_table, lpn_array[i], ppn + i);
         if(lpn_array[i]==131025)
@@ -414,6 +418,10 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
 
     if(start_ppa == DM_ZFTL_UNMAPPED_PPA){
         ret = -EIO;
+        printk(KERN_EMERG "[Write Error] ZNS free: %llu Cache free: %llu In proc reclaiming: %llu"
+                    ,atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_free_zone)
+                    ,atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_free_zone)
+                    ,atomic_read(&dm_zftl->nr_reclaim_work));
         goto FINISH;
     }
 
@@ -488,7 +496,8 @@ void dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
     if (bio_op(bio) == REQ_OP_WRITE){
         dm_zftl->total_write_traffic_sec_ += bio_sectors(bio);
         dm_zftl->last_write_traffic_ += bio_sectors(bio);
-        dm_zftl_try_reclaim(dm_zftl);
+        dm_zftl_cache_try_reclaim(dm_zftl);
+
     }
 
 #if DM_ZFTL_DEBUG
@@ -539,6 +548,20 @@ void dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
                         bio_op(bio));
             ret = -EIO;
     }
+
+
+    unsigned int flags;
+    spin_lock_irqsave(&dm_zftl->record_lock_, flags);
+    switch (bio_op(bio)) {
+        case REQ_OP_READ:
+            dm_zftl->foreground_read_traffic_ += dmz_bio_blocks(bio);
+            break;
+        case REQ_OP_WRITE:
+            dm_zftl->foreground_write_traffic_ += dmz_bio_blocks(bio);
+            break;
+    }
+    spin_unlock_irqrestore(&dm_zftl->record_lock_, flags);
+
 
     out:
     dm_zftl_bio_endio(bio, errno_to_blk_status(ret));
@@ -886,6 +909,14 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
         ret = -ENOMEM;
         goto err_dev;
     }
+
+    dmz->lsm_tree_compact_wq = alloc_workqueue("dm_zftl_lsm_compact_wq", WQ_MEM_RECLAIM | WQ_UNBOUND, 0);
+    if (!dmz->lsm_tree_compact_wq) {
+        ti->error = "Create io workqueue failed";
+        ret = -ENOMEM;
+        goto err_dev;
+    }
+
     atomic_set(&dmz->nr_reclaim_work, 0);
     atomic_set(&dmz->max_reclaim_read_work, DM_ZFTL_RECLAIM_MAX_READ_NUM_DEFAULT);
 
@@ -903,9 +934,19 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     //INIT_DELAYED_WORK(&dmz->reclaim_work->work, dm_zftl_reclaim_read_work);
     //mod_delayed_work(dmz->reclaim_read_wq, &dmz->reclaim_work->work, DM_ZFTL_RECLAIM_PERIOD);
 
-
-    dmz->last_write_traffic_ = 0;
+    spin_lock_init(&dmz->record_lock_);
+    dmz->cache_2_zns_reclaim_write_traffic_ = 0;
+    dmz->cache_2_zns_reclaim_read_traffic_ = 0;
+    dmz->zns_write_traffic_ = 0;
+    dmz->cache_write_traffic_ = 0;
+    dmz->foreground_read_traffic_ = 0;
+    dmz->foreground_write_traffic_ = 0;
+    dmz->foreground_reclaim_cnt_ = 0;
+    dmz->background_reclaim_cnt_ = 0;
     dmz->total_write_traffic_sec_ = 0;
+    dmz->last_write_traffic_ = 0;
+    dmz->last_compact_traffic_ = 0;
+
 
     ti->max_io_len = dmz->zone_device->zone_nr_sectors;
     ti->num_flush_bios = 1;
@@ -1018,17 +1059,28 @@ struct zoned_dev * dm_zftl_get_foregound_io_dev(struct dm_zftl_target * dm_zftl)
  */
 int dm_zftl_reset_zone(struct zoned_dev * dev, struct zone_info *zone)
 {
-    int ret;
-    ret = blkdev_zone_mgmt(dev->bdev, REQ_OP_ZONE_RESET,
+
+    struct zone_link_entry * zone_link = (struct zone_link_entry *)vmalloc(sizeof (struct zone_link_entry));
+    zone_link->id = zone->id;
+    list_add(&zone_link->link, &dev->zoned_metadata->free_zoned);
+    atomic_inc(&dev->zoned_metadata->nr_free_zone);
+
+    if(dm_zftl_is_zns(dev)){//TODO: Make sure init zone_dev flag before try to reset any zone
+        int ret;
+        ret = blkdev_zone_mgmt(dev->bdev, REQ_OP_ZONE_RESET,
                            zone->id * dev->zone_nr_sectors,
                            dev->zone_nr_sectors,
                            GFP_NOIO);
-    if (ret) {
-        printk(KERN_EMERG "Reset zone %u failed %d",
-                zone->id, ret);
-        return ret;
+        if (ret) {
+            printk(KERN_EMERG "Reset zone %u failed %d",
+                    zone->id, ret);
+            return ret;
+        }
+        zone->wp=0;
+    }else{
+
+        zone->wp=0;
     }
-    zone->wp=0;
 #if DM_ZFTL_DEBUG
     printk(KERN_EMERG "Reset zone => Device:%s Id:%llu Range: [%llu, %llu](blocks)"
                                 , dm_zftl_is_cache(dev) ? "cache" : "backend"

@@ -12,8 +12,7 @@
 #include <linux/device-mapper.h>
 #include <linux/dm-kcopyd.h>
 #include <linux/list.h>
-#include <linux/spinlock.h>
-#include <linux/mutex.h>
+
 #include <linux/workqueue.h>
 #include <linux/rwsem.h>
 #include <linux/rbtree.h>
@@ -61,6 +60,8 @@
 #define DM_ZFTL_DEBUG 0
 #define DM_ZFTL_MIN_BIOS 8192
 #define BDEVNAME_SIZE 256
+#define DM_ZFTL_COMPACT_ENABLE 0
+#define DM_ZFTL_COMPACT_INTERVAL 50 * 1024 //50 * 4MB = 200MB
 /*
  * Creates block devices with 4KB blocks, always.
  * copy from dm-zoned
@@ -87,8 +88,11 @@
 #define dmz_bio_blocks(bio)	dmz_sect2blk(bio_sectors(bio))
 #define DM_ZFTL_ZONED_DEV_CAP_RATIO 0.8
 
+#define DM_ZFTL_ZNS_GC_WATERMARK_PERCENTILE 30
 #define DM_ZFTL_FOREGROUND_DEV DM_ZFTL_CACHE
 #define DM_ZFTL_BACKGROUND_DEV DM_ZFTL_BACKEND
+
+#define DM_ZFTL_COMPACT_DEBUG 1
 
 enum {
     DMZAP_WR_OUTSTANDING,
@@ -97,14 +101,16 @@ enum {
 
 struct dm_zftl_mapping_table{
     struct lsm_tree * lsm_tree;
-
     unsigned int l2p_table_sz; // in blocks
     uint32_t * l2p_table; // all unmapped lba will be mapped to 0 (which is metadata zoned)
     uint32_t * p2l_table;
     uint8_t * device_bitmap; // 0-> cache 1-> backedend 1B -> 4*8 = 32KB: 32MB/TB
     uint8_t * validate_bitmap;
+
+
     struct mutex l2p_lock;
 };
+
 unsigned int dm_zftl_l2p_get(struct dm_zftl_mapping_table * mapping_table, unsigned int lpn);
 int dm_zftl_lpn_is_in_cache(struct dm_zftl_mapping_table * mapping_table, sector_t lpn);
 void dm_zftl_lpn_set_dev(struct dm_zftl_mapping_table * mapping_table, unsigned int lpn, int dev);
@@ -141,11 +147,42 @@ struct dm_zftl_reclaim_read_work{
     struct dm_zftl_target * target;
 };
 
+struct dm_zftl_compact_work{
+    struct work_struct work;
+    struct dm_zftl_target * target;
+};
 
 
 struct dm_zftl_target {
+
+    spinlock_t record_lock_;
+    unsigned int cache_2_zns_reclaim_write_traffic_;
+    unsigned int cache_2_zns_reclaim_read_traffic_;
+
+    // cache/zns(include gc) wriite traffic (4KB)
+    unsigned int zns_write_traffic_; // in 4K blocks = foregound reclaim + gc write io
+    unsigned int cache_write_traffic_; // in 4K blocks = foregound write io
+
+    // foreground R io traffic (4KB)
+    unsigned int foreground_read_traffic_;
+    // foreground W io traffic (4KB)
+    unsigned int foreground_write_traffic_;
+
+
+    unsigned int foreground_reclaim_cnt_;
+    unsigned int background_reclaim_cnt_;
+
+    //unused
     unsigned int total_write_traffic_sec_;
+
+    // traffic since last gc
     unsigned int last_write_traffic_;
+
+    // lsm tree traffic since last compact
+    unsigned int last_compact_traffic_;
+
+
+
 
     /* For cloned BIOs to conventional zones */
     struct bio_set		bio_set;
@@ -163,6 +200,8 @@ struct dm_zftl_target {
     struct workqueue_struct *reclaim_write_wq;
     struct workqueue_struct *gc_read_wq;
     struct workqueue_struct *gc_write_wq;
+
+    struct workqueue_struct *lsm_tree_compact_wq;
 
 
 
@@ -186,11 +225,13 @@ struct copy_buffer {
     unsigned int * lpn_buffer;
     unsigned int nr_blocks;
 };
+void dm_zftl_do_background_reclaim(struct work_struct *work);
 void dm_zftl_do_foreground_reclaim(struct work_struct *work);
+void dm_zftl_do_reclaim(struct work_struct *work, struct zoned_dev *reclaim_from, struct zoned_dev *copy_to);
 sector_t dm_zftl_get_dev_addr(struct dm_zftl_target * dm_zftl, sector_t ppa);
 int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_table,unsigned int * lpn_array,sector_t ppn,unsigned int nr_block);
 void dm_zftl_reclaim_read_work(struct work_struct *work);
-unsigned int dm_zftl_get_reclaim_zone(struct zoned_dev * dev);
+unsigned int dm_zftl_get_reclaim_zone(struct zoned_dev * dev, struct dm_zftl_mapping_table * mappping_table);
 void * dm_zftl_init_copy_buffer(struct dm_zftl_target * dm_zftl);
 void * dm_zftl_get_buffer_block_addr(struct dm_zftl_target * dm_zftl, unsigned int idx);
 int dm_zftl_async_dm_io(unsigned int num_regions, struct dm_io_region *where, int rw, void *data, unsigned long *error_bits);
@@ -270,7 +311,7 @@ int dm_zftl_init_bitmap(struct dm_zftl_target * dm_zftl);
 
 
 
-
+void dm_zftl_foreground_reclaim(struct dm_zftl_target * dm_zftl);
 struct zoned_dev * dm_zftl_get_background_io_dev(struct dm_zftl_target * dm_zftl);
 struct zoned_dev * dm_zftl_get_foregound_io_dev(struct dm_zftl_target * dm_zftl);
 sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, sector_t len);
@@ -280,8 +321,8 @@ int dm_zftl_reset_zone(struct zoned_dev * dev, struct zone_info *zone);
 void dm_zftl_zone_close(struct zoned_dev * dev, unsigned int zone_id);
 int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio);
 int dm_zftl_need_reclaim(struct dm_zftl_target * dm_zftl);
-void dm_zftl_do_reclaim(struct work_struct *work);
-void dm_zftl_try_reclaim(struct dm_zftl_target * dm_zftl);
+void dm_zftl_cache_try_reclaim(struct dm_zftl_target * dm_zftl);
+void dm_zftl_zns_try_gc(struct dm_zftl_target * dm_zftl);
 //use delay_work => trigger write_back when reach threshold
 //1) block all incoming write io & wait all current write io done
 //2) copy valid data to zns
@@ -293,4 +334,8 @@ void dm_zftl_try_reclaim(struct dm_zftl_target * dm_zftl);
 unsigned int dm_zftl_get_ppa_zone_id(struct dm_zftl_target * dm_zftl, sector_t ppa);
 struct zoned_dev * dm_zftl_get_ppa_dev(struct dm_zftl_target * dm_zftl, sector_t ppa);
 void dm_zftl_write_back_(struct work_struct *work);
+void dm_zftl_compact_work(struct work_struct *work);
+void dm_zftl_lsm_tree_try_compact(struct dm_zftl_target * dm_zftl);
+void dm_zftl_zns_try_gc(struct dm_zftl_target * dm_zftl);
+int dm_zftl_need_gc(struct dm_zftl_target * dm_zftl);
 #endif //DM_ZFTL_DM_ZFTL_H

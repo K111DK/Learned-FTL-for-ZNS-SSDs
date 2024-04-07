@@ -7,47 +7,106 @@
 #define COPY_BUFFER_SIZE 65536
 
 
-void dm_zftl_try_reclaim(struct dm_zftl_target * dm_zftl){
-    if(dm_zftl_need_reclaim(dm_zftl)){
+void dm_zftl_lsm_tree_try_compact(struct dm_zftl_target * dm_zftl){
+    if(dm_zftl->last_compact_traffic_ >= DM_ZFTL_COMPACT_INTERVAL && DM_ZFTL_COMPACT_ENABLE){
 
-        //printk(KERN_EMERG "Trigger reclaim");
+
+#if DM_ZFTL_COMPACT_DEBUG
+        printk(KERN_EMERG "[Compact] Trigger Compact");
+#endif
+
+        dm_zftl->last_compact_traffic_ = 0;
+        struct dm_zftl_compact_work * _work = kmalloc(sizeof(struct dm_zftl_compact_work), GFP_NOIO);
+        _work->target = dm_zftl;
+        INIT_WORK(&_work->work, dm_zftl_compact_work);
+        queue_work(dm_zftl->lsm_tree_compact_wq, &_work->work);
+    }
+
+}
+
+void dm_zftl_compact_work(struct work_struct *work){
+    struct dm_zftl_compact_work * _work = container_of(work, struct dm_zftl_compact_work, work);
+    struct dm_zftl_target * dm_zftl = _work->target;
+    lsm_tree_compact(dm_zftl->mapping_table->lsm_tree);
+}
+
+void dm_zftl_zns_try_gc(struct dm_zftl_target * dm_zftl){
+    if(dm_zftl_need_gc(dm_zftl)){
         atomic_inc(&dm_zftl->nr_reclaim_work);
 
         struct dm_zftl_reclaim_read_work * read_work = kmalloc(sizeof(struct dm_zftl_reclaim_read_work), GFP_NOIO);
-        INIT_WORK(&read_work->work, dm_zftl_do_foreground_reclaim);
+        INIT_WORK(&read_work->work, dm_zftl_do_background_reclaim);
         read_work->target = dm_zftl;
         queue_work(dm_zftl->reclaim_read_wq, &read_work->work);
-
     }
 }
 
-int dm_zftl_need_reclaim(struct dm_zftl_target * dm_zftl){
+int dm_zftl_need_gc(struct dm_zftl_target * dm_zftl){
     if(atomic_read(&dm_zftl->nr_reclaim_work) >= atomic_read(&dm_zftl->max_reclaim_read_work))
         return 0;
-
-    if(dm_zftl->last_write_traffic_ >= DM_ZFTL_RECLAIM_INTERVAL
-        && DM_ZFTL_RECLAIM_ENABLE){
-        dm_zftl->last_write_traffic_ = 0;
+    if(atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_full_zone) * DM_ZFTL_ZNS_GC_WATERMARK_PERCENTILE >=
+            atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_free_zone) * (100 - DM_ZFTL_ZNS_GC_WATERMARK_PERCENTILE)){
         return 1;
     }
-
     return 0;
 }
 
+void dm_zftl_cache_try_reclaim(struct dm_zftl_target * dm_zftl){
+    if(dm_zftl_need_reclaim(dm_zftl)){
+        dm_zftl_foreground_reclaim(dm_zftl);
+    }
+}
+
+void dm_zftl_foreground_reclaim(struct dm_zftl_target * dm_zftl){
+    //printk(KERN_EMERG "Trigger reclaim");
+    atomic_inc(&dm_zftl->nr_reclaim_work);
+
+    struct dm_zftl_reclaim_read_work * read_work = kmalloc(sizeof(struct dm_zftl_reclaim_read_work), GFP_NOIO);
+    INIT_WORK(&read_work->work, dm_zftl_do_foreground_reclaim);
+    read_work->target = dm_zftl;
+    queue_work(dm_zftl->reclaim_read_wq, &read_work->work);
+}
+
+
+int dm_zftl_need_reclaim(struct dm_zftl_target * dm_zftl){
+    //if(atomic_read(&dm_zftl->nr_reclaim_work) >= atomic_read(&dm_zftl->max_reclaim_read_work))
+    //    return 0;
+    if(     (
+                dm_zftl->last_write_traffic_ >= DM_ZFTL_RECLAIM_INTERVAL ||
+                atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_free_zone) <= 5
+            )
+            && DM_ZFTL_RECLAIM_ENABLE){
+        dm_zftl->last_write_traffic_ = 0;
+        return 1;
+    }
+    return 0;
+}
+
+void dm_zftl_do_background_reclaim(struct work_struct *work){
+    struct dm_zftl_reclaim_read_work * read_work = container_of(work, struct dm_zftl_reclaim_read_work, work);
+    struct dm_zftl_target * dm_zftl = read_work->target;
+    dm_zftl_do_reclaim(work, dm_zftl->zone_device, dm_zftl->zone_device);
+}
 
 void dm_zftl_do_foreground_reclaim(struct work_struct *work){
+    struct dm_zftl_reclaim_read_work * read_work = container_of(work, struct dm_zftl_reclaim_read_work, work);
+    struct dm_zftl_target * dm_zftl = read_work->target;
+    dm_zftl_do_reclaim(work, dm_zftl->cache_device, dm_zftl->zone_device);
+}
+
+void dm_zftl_do_reclaim(struct work_struct *work, struct zoned_dev *reclaim_from, struct zoned_dev *copy_to){
     struct dm_zftl_reclaim_read_work * read_work = container_of(work, struct dm_zftl_reclaim_read_work, work);
     struct dm_zftl_target * dm_zftl = read_work->target;
 
     struct copy_job * cp_job = vmalloc(sizeof (struct copy_job));
     cp_job->dm_zftl = dm_zftl;
-    cp_job->copy_from = dm_zftl->cache_device;
-    cp_job->writeback_to = dm_zftl->zone_device;
+    cp_job->copy_from = reclaim_from;
+    cp_job->writeback_to = copy_to;
     spin_lock_init(&cp_job->lock_);
 
     mutex_lock(&dm_zftl->mapping_table->l2p_lock);
     int ret;
-    unsigned int reclaim_zone_id = dm_zftl_get_reclaim_zone(cp_job->copy_from);
+    unsigned int reclaim_zone_id = dm_zftl_get_reclaim_zone(cp_job->copy_from, dm_zftl->mapping_table);
 
     cp_job->reclaim_zone_id = reclaim_zone_id;
 
@@ -70,11 +129,9 @@ void dm_zftl_do_foreground_reclaim(struct work_struct *work){
     mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
 }
 
-
 struct zoned_dev * dm_zftl_get_background_io_dev(struct dm_zftl_target * dm_zftl){
     return dm_zftl->zone_device;
 }
-
 
 //自定义排序函数  从小到大排序
 static int dm_zftl_cmp_(const void *a,const void *b)
@@ -88,8 +145,6 @@ static int dm_zftl_cmp_(const void *a,const void *b)
     else
         return 0;
 }
-
-
 
 void * dm_zftl_init_copy_buffer(struct dm_zftl_target * dm_zftl){
     dm_zftl->buffer = (struct copy_buffer *)vmalloc(sizeof (struct copy_buffer));
@@ -120,7 +175,6 @@ void * dm_zftl_get_buffer_block_addr(struct dm_zftl_target * dm_zftl, unsigned i
     }
     return NULL;
 }
-
 
 sector_t dm_zftl_get_zone_start_vppn(struct zoned_dev * dev, unsigned int zone_id){
     if(zone_id > dev->nr_zones){
@@ -178,10 +232,10 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
     struct dm_io_region * where = (struct dm_io_region *)vmalloc(sizeof (struct dm_io_region));
     sector_t start_ppa = dm_zftl_get_seq_wp(dev, nr_sectors);
 
-    //    if(start_ppa == DM_ZFTL_UNMAPPED_PPA){
-    //        ret = -EIO;
-    //        goto FINISH;
-    //    }
+    if(start_ppa == DM_ZFTL_UNMAPPED_PPA){
+        printk(KERN_EMERG "[Reclaim] Fatal: no free space for wriite back valid data");
+        BUG_ON(1);
+    }
 
 #if DM_ZFTL_RECLAIM_DEBUG
 
@@ -241,18 +295,22 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
 #endif
 
     //TODO:Fix metadata update and zone reset
-    //dm_zftl_reset_zone(job->copy_from, reclaim_zone);
+    dm_zftl_reset_zone(job->copy_from, reclaim_zone);
+
     job->writeback_to->zoned_metadata->opened_zoned->wp += nr_sectors;
-    job->copy_from->zoned_metadata->zones[reclaim_zone->id].wp = 0;
-
-    struct zone_link_entry * zone_link = (struct zone_link_entry *)vmalloc(sizeof (struct zone_link_entry));
-    zone_link->id = reclaim_zone->id;
-    list_add(&zone_link->link, &job->copy_from->zoned_metadata->free_zoned);
-    atomic_inc(&job->copy_from->zoned_metadata->nr_free_zone);
-
     atomic_dec(&dm_zftl->nr_reclaim_work);
 
     dm_zftl_valid_data_writeback_cb(0, (void *)dm_zftl);
+
+
+    unsigned int flags;
+    spin_lock_irqsave(&dm_zftl->record_lock_, flags);
+    dm_zftl->cache_2_zns_reclaim_write_traffic_ += job->nr_blocks;
+    dm_zftl->last_compact_traffic_ += job->nr_blocks;
+    spin_unlock_irqrestore(&dm_zftl->record_lock_, flags);
+
+    dm_zftl_lsm_tree_try_compact(dm_zftl);
+
     return 1;
 }
 
@@ -365,63 +423,89 @@ int dm_zftl_read_valid_zone_data_to_buffer(struct dm_zftl_target * dm_zftl, stru
     printk(KERN_EMERG "Sort error");
     return 1;
 }
+unsigned int dm_zftl_u8_count(uint8_t bitmap){
+    unsigned int cnt = 0;
+    while(bitmap){
+        cnt++;
+        bitmap &= (bitmap - 1);
+    }
+    return cnt;
+}
 
-unsigned int dm_zftl_get_reclaim_zone(struct zoned_dev * dev){
+unsigned int dm_zftl_zone_vaild_count(struct zoned_dev * dev, unsigned int zone_id, struct dm_zftl_mapping_table * mapping_table){
+    unsigned int start_bm = dm_zftl_get_zone_start_vppn(dev, zone_id) / 8;
+    unsigned int end_bm = start_bm + dev->zone_nr_blocks / 8;
+    unsigned int i, cnt = 0;
+    for(i = start_bm; i < end_bm; ++i){
+        cnt += dm_zftl_u8_count(mapping_table->validate_bitmap[i]);
+    }
+    return cnt;
+}
+
+unsigned int dm_zftl_get_victim_greedy(struct zoned_dev * dev, struct dm_zftl_mapping_table * mapping_table){
+    if(atomic_read(&dev->zoned_metadata->nr_full_zone) == 0)
+        return 0;
+
+    struct zone_link_entry *zone_link = NULL;
+
+    int found = 0;
+    int victim_id = 0;
+    unsigned int min_victim_valid = dev->zone_nr_blocks;
+    list_for_each_entry(zone_link, &dev->zoned_metadata->full_zoned, link){
+        if(zone_link){
+            found = 1;
+            unsigned int valid_cnt = dm_zftl_zone_vaild_count(dev, zone_link->id, mapping_table);
+            if(valid_cnt < min_victim_valid){
+                victim_id = zone_link->id;
+                min_victim_valid = valid_cnt;
+            }
+        }
+    }
+
+    if(found){
+        list_del(&zone_link->link);
+        atomic_dec(&dev->zoned_metadata->nr_full_zone);
+    }
+
+    return victim_id;
+}
+
+unsigned int dm_zftl_get_reclaim_zone(struct zoned_dev * dev, struct dm_zftl_mapping_table * mappping_table){
+    int ret;
+    unsigned int reclaim_zone_id = 0;
     if(dm_zftl_is_cache(dev)){
+
         struct zone_link_entry reclaim_zone;
-        unsigned int reclaim_zone_id = 0;
+        reclaim_zone_id = 0;
         int ret;
         ret = kfifo_out(&dev->write_fifo, &reclaim_zone, sizeof(struct zone_link_entry));
         if (!ret){
-#if DM_ZFTL_DEBUG
-            printk(KERN_EMERG "Device:%s have not full zone"
-            , dm_zftl_is_cache(dev) ? "Cache" : "ZNS");
-#endif
             reclaim_zone_id = 0;
             return 0;
         }
 
         reclaim_zone_id = reclaim_zone.id;
         atomic_dec(&dev->zoned_metadata->nr_full_zone);
-#if DM_ZFTL_RECLAIM_DEBUG
-        printk(KERN_EMERG "Reclaim zone => Device:%s Id:%llu Range: [%llu, %llu](blocks)"
-            , dm_zftl_is_cache(dev) ? "Cache" : "ZNS"
-            , reclaim_zone_id
-            , reclaim_zone_id * dev->zone_nr_blocks
-            , (reclaim_zone_id + 1) * dev->zone_nr_blocks);
-    printk(KERN_EMERG "Remaing full zone:%d", atomic_read(&dev->zoned_metadata->nr_full_zone));
-#endif
-        return reclaim_zone_id;
+
+
+    }else{
+
+        reclaim_zone_id = dm_zftl_get_victim_greedy(dev, mappping_table);
+        if(reclaim_zone_id)
+            return reclaim_zone_id;
+
     }
 
-//    if(atomic_read(&dev->zoned_metadata->nr_full_zone) == 0) {
-//#if DM_ZFTL_DEBUG
-//        printk(KERN_EMERG "Device:%s have not full zone"
-//            , dm_zftl_is_cache(dev) ? "Cache" : "ZNS");
-//#endif
-//        return 0;
-//    }
-//    struct zone_link_entry *zone_link = NULL;
-//    list_for_each_entry(zone_link, &dev->zoned_metadata->full_zoned, link){
-//        if(zone_link)
-//            goto FOUND;
-//
-//    }
-//    return 0;
-//
-//    FOUND:
-//    list_del(&zone_link->link);
-//    atomic_dec(&dev->zoned_metadata->nr_full_zone);
-//    //TODO:Is this neccesary?
-//    dev->zoned_metadata->opened_zoned = &dev->zoned_metadata->zones[zone_link->id];
-//#if DM_ZFTL_DEBUG
-//    printk(KERN_EMERG "Reclaim zone => Device:%s Id:%llu Range: [%llu, %llu](blocks)"
-//            , dm_zftl_is_cache(dev) ? "Cache" : "ZNS"
-//            , zone_link->id
-//            , zone_link->id * dev->zone_nr_blocks
-//            , (zone_link->id + 1) * dev->zone_nr_blocks);
-//    printk(KERN_EMERG "Remaing full zone:%d", atomic_read(&dev->zoned_metadata->nr_full_zone));
-//#endif
-//    return zone_link->id;
-    return 0;
+#if DM_ZFTL_RECLAIM_DEBUG
+    if(reclaim_zone_id){
+        printk(KERN_EMERG "Reclaim zone => Device:%s Id:%llu Range: [%llu, %llu](blocks)"
+                , dm_zftl_is_cache(dev) ? "Cache" : "ZNS"
+                , reclaim_zone_id
+                , reclaim_zone_id * dev->zone_nr_blocks
+                , (reclaim_zone_id + 1) * dev->zone_nr_blocks);
+        printk(KERN_EMERG "Remaing full zone:%d", atomic_read(&dev->zoned_metadata->nr_full_zone));
+    }
+#endif
+
+    return reclaim_zone_id;
 }
