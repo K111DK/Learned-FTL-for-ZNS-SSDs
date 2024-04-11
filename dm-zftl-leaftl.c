@@ -1825,6 +1825,20 @@ void free_seg(struct segment * seg){
 }
 
 
+// make sure max valid ppn no greadter than MAX + err_bound
+unsigned int lsm_tree_predict_correct(unsigned int *p2l_table, unsigned int lpn, unsigned int predicted_ppn) {
+    unsigned int predicted_lpn = p2l_table[predicted_ppn];
+    if(predicted_lpn == lpn)
+        return predicted_ppn;
+    // o.w do localsearch
+    unsigned int search_ppn;
+    for(search_ppn = predicted_ppn - ERROR_BOUND; search_ppn <= predicted_ppn + ERROR_BOUND; ++search_ppn){
+           if(p2l_table[search_ppn] == lpn)
+               return search_ppn;
+    }
+    return DM_ZFTL_UNMAPPED_PPA;
+}
+
 #ifdef __cplusplus
 }
 #endif

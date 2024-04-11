@@ -17,12 +17,12 @@ unsigned int dm_zftl_l2p_get(struct dm_zftl_mapping_table * mapping_table, unsig
     if(dm_zftl_lpn_is_in_cache(mapping_table, lpn)){
         return mapping_table->l2p_table[lpn];
     }else{
-        if(lsm_tree_get_ppn(mapping_table->lsm_tree,
-                            lpn) != mapping_table->l2p_table[lpn])
-            printk(KERN_EMERG "Lsm:%llu Cache:%llu", lsm_tree_get_ppn(mapping_table->lsm_tree,
-                                                       lpn), mapping_table->l2p_table[lpn]);
-        return lsm_tree_get_ppn(mapping_table->lsm_tree,
-                                lpn);
+        unsigned int ppn = lsm_tree_get_ppn(mapping_table->lsm_tree,
+                                            lpn);
+        ppn = lsm_tree_predict_correct(mapping_table->p2l_table, lpn, ppn);
+        if(ppn != mapping_table->l2p_table[lpn])
+            printk(KERN_EMERG "[Get] predict err! => got:%llu wanted:%llu", ppn, mapping_table->l2p_table[lpn]);
+        return ppn;
     }
 }
 

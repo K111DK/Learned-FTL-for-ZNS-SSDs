@@ -7,7 +7,7 @@
 #define LEAFTL_DM_ZFTL_LEAFTL_H
 #define DM_ZFTL_LEA_DEBUG 1
 #define seg_end(seg) (seg->start_lpn + seg->len)
-#define seg_start(seg) seg->start_lpn
+#define seg_start(seg) (seg->start_lpn)
 #define DM_ZFTL_LEA_ORIGIN 1
 #define ERROR_BOUND 2
 #define DM_ZFTL_DIV_ROUND_UP(n,d) (((n) + (d) - 1) / (d))
@@ -238,4 +238,5 @@ void free_seg(struct segment * seg);
 int lsm_tree_can_insert(struct lsm_tree_level * level, struct segment *insert_seg);
 
 int lsm_tree_try_clean_seg(struct frame_valid_bitmap * upper_bm, struct segment * origin_seg);
+unsigned int lsm_tree_predict_correct(unsigned int *p2l_table, unsigned int lpn, unsigned int predicted_ppn);
 #endif //LEAFTL_DM_ZFTL_LEAFTL_H

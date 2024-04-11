@@ -52,8 +52,8 @@
 #define DM_ZFTL_DEV_STR(dev) dm_zftl_is_cache(dev) ? "Cache" : "ZNS"
 #define DM_ZFTL_RECLAIM_PERIOD	(1 * HZ)
 #define DM_ZFTL_FULL_THRESHOLD 0
-#define DM_ZFTL_UNMAPPED_PPA 0
-#define DM_ZFTL_UNMAPPED_LPA ~((unsigned int) 0)
+#define DM_ZFTL_UNMAPPED_PPA 0 // First n zone is used as metadata zone
+#define DM_ZFTL_UNMAPPED_LPA ~((unsigned int) 0) // [ 0,  MAX_UINT - 1 ]
 #define DM_ZFTL_READ_SPLIT 1
 #define DM_ZFTL_EXPOSE_TYPE BLK_ZONED_NONE
 #define DM_ZFTL_MAPPING_DEBUG 0
