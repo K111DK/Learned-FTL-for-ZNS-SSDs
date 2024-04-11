@@ -4,7 +4,7 @@
 
 #ifndef DM_ZFTL_DM_ZFTL_H
 #define DM_ZFTL_DM_ZFTL_H
-#include "dm-zftl-leaftl.h"
+#include "DM-ZFTL/dm-zftl-leaftl.h"
 
 
 #include <linux/types.h>
