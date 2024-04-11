@@ -4,7 +4,7 @@
 
 #ifndef DM_ZFTL_DM_ZFTL_H
 #define DM_ZFTL_DM_ZFTL_H
-#include "DM-ZFTL/dm-zftl-leaftl.h"
+#include "dm-zftl-leaftl.h"
 
 
 #include <linux/types.h>
@@ -92,7 +92,7 @@
 #define DM_ZFTL_FOREGROUND_DEV DM_ZFTL_CACHE
 #define DM_ZFTL_BACKGROUND_DEV DM_ZFTL_BACKEND
 
-#define DM_ZFTL_COMPACT_DEBUG 1
+
 
 enum {
     DMZAP_WR_OUTSTANDING,

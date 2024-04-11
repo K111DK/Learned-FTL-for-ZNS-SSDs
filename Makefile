@@ -1,6 +1,6 @@
 obj-m += dm-zftl.o
 dm-zftl-y += dm-zftl-target.o dm-zftl-reclaim.o
-dm-zftl-y += /DM-LZFTL
+dm-zftl-y += dm-zftl-leaftl.o
 
 
 .PHONY: all
