@@ -94,13 +94,12 @@ void lsm_tree_insert(struct segment * seg, struct lsm_tree * lsm_tree){
     if(overlap_segs){
         struct lsm_tree_level * new_level = lsm_tree_insert_new_level_(frame, first_level);
         overlap_segs = lsm_tree_insert_segs_to_level_(overlap_segs, new_level);
+        BUG_ON(overlap_segs);
     }
     lsm_tree_promote(lsm_tree);
 }
 
 
-    struct segment * overlap_tail = NULL;
-    struct segment * overlap_segs_head;
 struct segment *lsm_tree_insert_segs_to_level_(struct segment *insert_segs,
                                                struct lsm_tree_level *level){
     struct segment * overlap_head = NULL;
@@ -333,57 +332,6 @@ int lsm_tree_try_clean_seg(struct frame_valid_bitmap * upper_bm, struct segment 
  * */
 int lsm_tree_try_merge_seg_(struct segment *origin_seg,
                             struct segment *insert_seg){
-
-//    if(seg_start(insert_seg) > seg_start(origin_seg) &&
-//       seg_end(insert_seg) < seg_end(origin_seg))
-//        return PUSH_DOWN;
-//
-//
-//    if(seg_start(insert_seg) <= seg_start(origin_seg) &&
-//       seg_end(insert_seg) >= seg_end(origin_seg) && insert_seg->is_acc_seg)
-//        return DEL_SEG;
-//
-//
-//    if(seg_start(origin_seg) < seg_start(insert_seg) && seg_end(origin_seg) >= seg_start(insert_seg)){
-//        if(insert_seg->is_acc_seg && origin_seg->is_acc_seg){
-//            unsigned int ori_len = origin_seg->len;
-//            origin_seg->len = seg_start(insert_seg) - 1 - origin_seg->start_lpn;
-//            return SAME_LEVEL;
-//        }else if(insert_seg->is_acc_seg) {
-//            unsigned int tail_cut = 0;
-//            int i = 0;
-//            for(i = 0; i < origin_seg->CRB->buffer_len; ++i) {
-//                if(origin_seg->CRB->lpn[i] >= seg_start(insert_seg)){
-//                    tail_cut++;
-//                }
-//            }
-//            if(tail_cut){
-//                if(tail_cut == origin_seg->CRB->buffer_len)
-//                    return DEL_SEG;
-//
-//                unsigned int *new_lpns = MALLOC((origin_seg->CRB->buffer_len - tail_cut) * sizeof(unsigned int));
-//                for(i = 0;i < origin_seg->CRB->buffer_len - tail_cut;++i)
-//                    new_lpns[i] = origin_seg->CRB->lpn[i];
-//                origin_seg->CRB->buffer_len -= tail_cut;
-//                origin_seg->len = new_lpns[i - 1] - new_lpns[0];
-//                FREE(origin_seg->CRB->lpn);
-//                origin_seg->CRB->lpn = new_lpns;
-//
-//
-//            }
-//
-//        }
-//    }else if(seg_end(origin_seg) > seg_end(insert_seg) && seg_start(origin_seg) <= seg_end(insert_seg)) {
-//        if(insert_seg->is_acc_seg && origin_seg->is_acc_seg){
-//            unsigned int pre_start = origin_seg->start_lpn;
-//            origin_seg->start_lpn = seg_end(insert_seg) + 1;
-//            origin_seg->len -= origin_seg->start_lpn - pre_start;
-//            return SAME_LEVEL;
-//        }else if(insert_seg->is_acc_seg) {
-//
-//
-//        }
-//    }
 
 
     struct frame_valid_bitmap * insert_bm = get_seg_bm(insert_seg);

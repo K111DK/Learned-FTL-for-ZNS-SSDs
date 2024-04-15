@@ -11,19 +11,439 @@
 #include <linux/bio.h>
 #include <linux/dm-ioctl.h>
 #include <linux/spinlock.h>
+#define DM_ZFTL_SFTL_L2P_FRAME_LENGTH (1024)
+#define DM_ZFTL_LEAFTL_L2P_FRAME_LENGTH (256)
+#define DM_ZFTL_MAX_L2P_SIZE ((unsigned int)2 * 1024 * 1024 * 1024) // in bytes 2GB
+// dm_map => try_pin_l2p =>  (succeed) (remove from lru) => submit io to queue ... => io fin , unlock map, return it to lru
+//                        => queue l2p io
+//                                    => process => cb: add to lru, then try_pin_again
+//
+// dm_map => try_pin_l2p: try get l2p page from mem pool => (all succeed)
+//                                                       => (queue fail)
+//
+// (all succeed) => (check ok and submit queue io)
+// (fail) => queue l2p io
+//
+//
+//  l2p io => fake => cb ctx_update=> done_l2p_mem_pool * l2p_cache = dm_zftl->l2p_mem_pool;
+//
+//
+//
+void dm_zftl_l2p_set_init(struct dm_zftl_target * dm_zftl){
+    dm_zftl->l2p_mem_pool = MALLOC(sizeof (struct dm_zftl_l2p_mem_pool));
+    struct dm_zftl_l2p_mem_pool * l2p_mem_pool = dm_zftl->l2p_mem_pool;
+    int _blocks = dmz_sect2blk(dm_zftl->capacity_nr_sectors);
 
+    l2p_mem_pool->lbns_in_frame = DM_ZFTL_SFTL_L2P_FRAME_LENGTH;
+    l2p_mem_pool->max_frame = _blocks / l2p_mem_pool->lbns_in_frame;
+
+    l2p_mem_pool->l2f_table = MALLOC_ARRAY(
+            l2p_mem_pool->max_frame
+    , sizeof(struct dm_zftl_l2p_frame *)
+    );
+    l2p_mem_pool->maxium_l2p_size = DM_ZFTL_MAX_L2P_SIZE;
+
+    l2p_mem_pool->GTD = MALLOC_ARRAY(
+            l2p_mem_pool->max_frame
+    , sizeof(unsigned int)
+    );
+
+    l2p_mem_pool->frame_access_cnt = MALLOC_ARRAY(
+            l2p_mem_pool->max_frame
+    ,sizeof(uint8_t));
+
+
+    dm_zftl->mapping_table->l2p_cache = l2p_mem_pool;
+
+    unsigned int i;
+    for(i = 0; i < l2p_mem_pool->max_frame; ++i){
+        l2p_mem_pool->l2f_table[i] = NULL;
+#if DM_ZFTL_USING_LEA_FTL
+        l2p_mem_pool->GTD[i] = 0;
+#else
+        l2p_mem_pool->GTD[i] = 1024;
+        l2p_mem_pool->frame_access_cnt[i] = 0;
+#endif
+    }
+
+    l2p_mem_pool->current_size = 0;
+    spin_lock_init(&l2p_mem_pool->_lock);
+    TAILQ_INIT(&l2p_mem_pool->_frame_list);
+}
+
+struct dm_zftl_l2p_frame * dm_zftl_get_lpn_frame(struct dm_zftl_target * dm_zftl, unsigned int lpn){
+    return dm_zftl_get_lpn_frame_sftl__(dm_zftl, lpn);
+}
+struct dm_zftl_l2p_frame * dm_zftl_get_lpn_frame_leaftl__(struct dm_zftl_target * dm_zftl, unsigned int lpn){
+    struct dm_zftl_l2p_mem_pool * l2p_cache = dm_zftl->l2p_mem_pool;
+    if(lpn >= dmz_sect2blk(dm_zftl->capacity_nr_sectors))
+        return NULL;
+    return l2p_cache->l2f_table[lpn / l2p_cache->lbns_in_frame];
+}
+struct dm_zftl_l2p_frame * dm_zftl_get_lpn_frame_sftl__(struct dm_zftl_target * dm_zftl, unsigned int lpn){
+    struct dm_zftl_l2p_mem_pool * l2p_cache = dm_zftl->l2p_mem_pool;
+    if(lpn >= dmz_sect2blk(dm_zftl->capacity_nr_sectors))
+         BUG_ON(1);
+    return l2p_cache->l2f_table[lpn / l2p_cache->lbns_in_frame];
+}
+
+
+int dm_zftl_try_l2p_pin(struct dm_zftl_target *dm_zftl, struct bio *bio){
+    int nr_blocks = dmz_bio_blocks(bio);
+    int start = dmz_bio_block(bio);
+    int end = start + nr_blocks;
+    if(!nr_blocks)
+        return 0;
+
+    struct dm_zftl_l2p_mem_pool * l2p_cache = dm_zftl->l2p_mem_pool;
+    int i = 0;
+    int frame_no;
+    struct dm_zftl_l2p_frame * frame = NULL;
+
+    struct l2p_pin_work * pin_work_ctx = MALLOC(sizeof(struct l2p_pin_work));
+    TAILQ_INIT(&pin_work_ctx->_deferred_pin_list);
+    pin_work_ctx->total_l2p_page = nr_blocks;
+    pin_work_ctx->bio = bio;
+    pin_work_ctx->dm_zftl = dm_zftl;
+
+
+    atomic_set(&pin_work_ctx->deferred_cnt, 0);
+    atomic_set(&pin_work_ctx->pinned_cnt, 0);
+    printk(KERN_EMERG "[PIN]Try pin:[%u, %u]",start, end);
+
+    for(i = start; i < end; ++i ){
+        frame_no = i / l2p_cache->lbns_in_frame;
+        frame = l2p_cache->l2f_table[frame_no];
+        if(!frame){
+
+            //Alloc frame
+            frame = MALLOC(sizeof(struct dm_zftl_l2p_frame));
+            atomic_set(&frame->ref_count, 0);
+            frame->on_lru_list = 0;
+            frame->frame_no = frame_no;
+            spin_lock_init(&frame->_lock);
+
+            atomic_inc(&pin_work_ctx->deferred_cnt);
+            TAILQ_INSERT_HEAD(&pin_work_ctx->_deferred_pin_list,
+                              frame, list_entry);
+
+        }else{
+            dm_zftl_pin_frame(l2p_cache, frame);
+            atomic_inc(&pin_work_ctx->pinned_cnt);
+        }
+    }
+
+    if(dm_zftl_is_pin_complete(pin_work_ctx)){
+        // kick off normal io
+        dm_zftl_l2p_pin_complete(dm_zftl, bio);
+    }else{
+        // queue page in/ page out io
+        dm_zftl_queue_l2p_pin_io(dm_zftl, pin_work_ctx);
+    }
+    return 0;
+}
+
+void dm_zftl_pin_frame(struct dm_zftl_l2p_mem_pool *l2p_cache, struct dm_zftl_l2p_frame * frame){
+    atomic_inc(&frame->ref_count);
+    dm_zftl_del_from_lru(l2p_cache, frame);
+    return;
+}
+
+void dm_zftl_unpin_frame(struct dm_zftl_l2p_mem_pool *l2p_cache, struct dm_zftl_l2p_frame * frame){
+    BUG_ON(!frame);
+    //BUG_ON(!l2p_cache->l2f_table[frame->frame_no]);
+    atomic_dec(&frame->ref_count);
+    if(!atomic_read(&frame->ref_count))
+        dm_zftl_add_to_lru(l2p_cache, frame);
+}
+
+int dm_zftl_is_pin_complete(struct l2p_pin_work * pin_ctx){
+    return pin_ctx->total_l2p_page == (atomic_read(&pin_ctx->pinned_cnt));
+}
+
+int dm_zftl_queue_l2p_pin_io(struct dm_zftl_target *dm_zftl, struct l2p_pin_work *pin_work_ctx){
+    INIT_WORK(&pin_work_ctx->work, dm_zftl_do_l2p_pin_io);
+    queue_work(dm_zftl->l2p_pin_wq, &pin_work_ctx->work);
+    return 0;
+}
+
+void dm_zftl_do_l2p_pin_io(struct work_struct * work){
+    struct l2p_pin_work * pin_work = container_of(work, struct l2p_pin_work, work);
+    unsigned int i = 0;
+    unsigned int total_io_page = (unsigned int) atomic_read(&pin_work->deferred_cnt);
+    struct dm_io_region * where = kvmalloc_array(total_io_page,
+                                                 sizeof(struct dm_io_region), GFP_KERNEL | __GFP_ZERO);
+    for(i = 0 ; i < total_io_page; ++i){
+
+        where[i].bdev = pin_work->dm_zftl->cache_device->bdev;
+        where[i].sector = 0;//TODO: Currently we only read first 4k block of cache device to stimulate page in io
+        where[i].count = dmz_blk2sect(1);
+
+        struct dm_io_request iorq;
+        iorq.bi_op = REQ_OP_READ;
+        iorq.bi_op_flags = 0;
+        iorq.mem.type = DM_IO_VMA;
+        iorq.mem.ptr.vma = pin_work->dm_zftl->dummy_l2p_buffer;
+        iorq.notify.fn = dm_zftl_l2p_pin_io_cb;
+        iorq.notify.context = pin_work;
+        iorq.client = pin_work->dm_zftl->io_client;
+        //spin_lock_irqsave(&read_io->lock_, read_io->flag);
+        dm_io(&iorq, 1, &where[i], NULL);
+
+    }
+}
+
+void dm_zftl_l2p_pin_io_cb(unsigned long error, void * context){
+    struct l2p_pin_work * pin_work_ctx = (struct l2p_pin_work *)context;
+    atomic_inc(&pin_work_ctx->pinned_cnt);
+    printk(KERN_EMERG "l2p pin cb:[%u, %u]", dmz_bio_block(pin_work_ctx->bio)
+                                        , dmz_bio_block(pin_work_ctx->bio) + dmz_bio_blocks(pin_work_ctx->bio));
+
+    if(dm_zftl_is_pin_complete(pin_work_ctx)){
+        struct dm_zftl_l2p_frame * frame;
+        struct dm_zftl_l2p_mem_pool * l2p_cache = pin_work_ctx->dm_zftl->l2p_mem_pool;
+
+        TAILQ_FOREACH(frame, &pin_work_ctx->_deferred_pin_list, list_entry){
+            //TODO: add GTD
+
+            l2p_cache->l2f_table[frame->frame_no] = frame;
+            dm_zftl_add_to_lru(l2p_cache, frame);
+            dm_zftl_pin_frame(l2p_cache, frame);
+        }
+        dm_zftl_l2p_pin_complete(pin_work_ctx->dm_zftl, pin_work_ctx->bio);
+    }
+}
+
+int dm_zftl_l2p_pin_complete(struct dm_zftl_target *dm_zftl, struct bio *bio){
+    //queue io
+    printk(KERN_EMERG "[PIN]pin complete![%u, %u]"
+           , dmz_bio_block(bio)
+           , dmz_bio_block(bio) + dmz_bio_blocks(bio));
+    dm_zftl_queue_io(dm_zftl, bio);
+    return 1;
+}
+
+
+
+void dm_zftl_del_from_lru(struct dm_zftl_l2p_mem_pool * l2p_cache, struct dm_zftl_l2p_frame * frame){
+    BUG_ON(!frame);
+    unsigned int flags1,flags2;
+    spin_lock_irqsave(&l2p_cache->_lock, flags1);
+    spin_lock_irqsave(&frame->_lock, flags2);
+    if(frame->on_lru_list){
+        TAILQ_REMOVE(&l2p_cache->_frame_list, frame, list_entry);
+        frame->on_lru_list = 0;
+    }
+    spin_unlock_irqrestore(&frame->_lock, flags2);
+    spin_unlock_irqrestore(&l2p_cache->_lock, flags1);
+
+}
+void dm_zftl_add_to_lru(struct dm_zftl_l2p_mem_pool * l2p_cache, struct dm_zftl_l2p_frame * frame){
+    BUG_ON(!frame);
+    unsigned int flags1,flags2;
+    spin_lock_irqsave(&l2p_cache->_lock, flags1);
+    spin_lock_irqsave(&frame->_lock, flags2);
+    if(!frame->on_lru_list){
+        TAILQ_INSERT_HEAD(&l2p_cache->_frame_list, frame, list_entry);
+        frame->on_lru_list = 1;
+    }
+    spin_unlock_irqrestore(&frame->_lock, flags2);
+    spin_unlock_irqrestore(&l2p_cache->_lock, flags1);
+}
+
+void dm_zftl_l2p_promote(struct dm_zftl_l2p_mem_pool * l2p_cache, struct dm_zftl_l2p_frame * frame){
+
+    if(!frame->on_lru_list)
+        return;
+    //TODO:dose this useful???
+}
+
+struct dm_zftl_l2p_frame * dm_zftl_l2p_evict(struct dm_zftl_l2p_mem_pool * l2p_cache){
+    struct dm_zftl_l2p_frame * frame = dm_zftl_l2p_coldest(l2p_cache);//?
+    if(!frame)
+        return NULL;
+    if(atomic_read(&frame->ref_count))
+        return NULL;
+    l2p_cache->l2f_table[frame->frame_no] = NULL;
+    dm_zftl_del_from_lru(l2p_cache, frame);
+    return frame;
+}
+
+void dm_zftl_l2p_put(struct dm_zftl_l2p_mem_pool * l2p_cache, struct dm_zftl_l2p_frame * frame){
+    BUG_ON(!frame);
+    BUG_ON(!l2p_cache);
+    l2p_cache->l2f_table[frame->frame_no] = frame;
+}
+
+struct dm_zftl_l2p_frame * dm_zftl_l2p_coldest(struct dm_zftl_l2p_mem_pool * l2p_cache){
+    return TAILQ_LAST(&l2p_cache->_frame_list, _frame_list);
+}
+
+int dm_zftl_need_evict(struct dm_zftl_l2p_mem_pool * l2p_cache){
+    unsigned int flags;
+    int is_overflow = 0;
+    spin_lock_irqsave(&l2p_cache->_lock, flags);
+    is_overflow = l2p_cache->current_size > l2p_cache->maxium_l2p_size;;
+    spin_unlock_irqrestore(&l2p_cache->_lock, flags);
+    return is_overflow;
+}
+
+
+void dm_zftl_try_evict(struct dm_zftl_target * dm_zftl, struct dm_zftl_l2p_mem_pool * l2p_cache){
+    if(dm_zftl_need_evict(l2p_cache)){
+        struct dm_zftl_l2p_frame * frame = dm_zftl_l2p_evict(l2p_cache);
+        if(frame) {
+            struct l2p_page_out_work * page_out = MALLOC(sizeof (struct l2p_page_out_work));
+            page_out->page_out_cnt = 1;
+            page_out->l2p_cache = l2p_cache;
+            page_out->frame = frame;
+            page_out->dm_zftl = dm_zftl;
+            INIT_WORK(&page_out->work, dm_zftl_do_evict);
+            queue_work(dm_zftl->l2p_page_out_wq, &page_out->work);
+        }
+    }
+}
+
+void dm_zftl_do_evict(struct work_struct *work){
+    struct l2p_page_out_work * page_out_work = container_of(work, struct l2p_page_out_work, work);
+    struct dm_io_region * where = MALLOC(sizeof (struct dm_io_region));
+    where->bdev = page_out_work->dm_zftl->cache_device->bdev;
+    where->sector = page_out_work->frame->frame_no;//TODO: Currently we only read first 4k block of cache device to stimulate page in io
+    where->count = dmz_blk2sect(1);
+
+    struct dm_io_request iorq;
+    iorq.bi_op = REQ_OP_READ;
+    iorq.bi_op_flags = 0;
+    iorq.mem.type = DM_IO_VMA;
+    iorq.mem.ptr.vma = page_out_work->dm_zftl->dummy_l2p_buffer;
+    iorq.notify.fn = dm_zftl_l2p_evict_cb;
+    iorq.notify.context = page_out_work;
+    iorq.client = page_out_work->dm_zftl->io_client;
+    //spin_lock_irqsave(&read_io->lock_, read_io->flag);
+    dm_io(&iorq, 1, where, NULL);
+}
+
+void dm_zftl_l2p_evict_cb(unsigned long error, void * context){
+    struct l2p_page_out_work * page_out_work = (struct l2p_page_out_work *)context;
+    unsigned int flags;
+    spin_lock_irqsave(&page_out_work->l2p_cache->_lock, flags);
+    page_out_work->l2p_cache->current_size -= page_out_work->l2p_cache->GTD[page_out_work->frame->frame_no];
+    spin_unlock_irqrestore(&page_out_work->l2p_cache->_lock, flags);
+}
+
+int dm_zftl_init_mapping_table(struct dm_zftl_target * dm_zftl){
+
+
+
+    dm_zftl->mapping_table = (struct dm_zftl_mapping_table *)vmalloc(sizeof(struct dm_zftl_mapping_table));
+    mutex_init(&dm_zftl->mapping_table->l2p_lock);
+    dm_zftl->mapping_table->l2p_table_sz = dmz_sect2blk(dm_zftl->capacity_nr_sectors);
+    dm_zftl->mapping_table->l2p_table = kvmalloc_array(dm_zftl->mapping_table->l2p_table_sz,
+                                                       sizeof(uint32_t), GFP_KERNEL | __GFP_ZERO);
+    dm_zftl->mapping_table->p2l_table = kvmalloc_array(dm_zftl->mapping_table->l2p_table_sz,
+                                                       sizeof(uint32_t), GFP_KERNEL | __GFP_ZERO);
+    dm_zftl->mapping_table->device_bitmap = kvmalloc_array( (dm_zftl->mapping_table->l2p_table_sz) / 8 + 1 ,
+                                                            sizeof(uint8_t), GFP_KERNEL | __GFP_ZERO);
+    dm_zftl->mapping_table->validate_bitmap = kvmalloc_array( (dm_zftl->mapping_table->l2p_table_sz) / 8 + 1 ,
+                                                              sizeof(uint8_t), GFP_KERNEL | __GFP_ZERO);
+    dm_zftl->mapping_table->lsm_tree = lsm_tree_init(dm_zftl->mapping_table->l2p_table_sz);
+    unsigned int ppn, lpn, i;
+    for(ppn = 0; ppn < dm_zftl->mapping_table->l2p_table_sz; ppn++){
+        lpn = ppn;
+        dm_zftl->mapping_table->l2p_table[lpn] = DM_ZFTL_UNMAPPED_PPA;
+        dm_zftl->mapping_table->p2l_table[ppn] = DM_ZFTL_UNMAPPED_LPA;
+        dm_zftl_invalidate_ppn(dm_zftl->mapping_table, ppn);
+        dm_zftl_lpn_set_dev(dm_zftl->mapping_table, lpn, DM_ZFTL_CACHE);
+    }
+    return 0;
+}
+
+sector_t dm_zftl_get(struct dm_zftl_mapping_table * mapping_table, sector_t lba){
+    sector_t ppa;
+    if((unsigned int)lba > mapping_table->l2p_table_sz){
+        ppa = DM_ZFTL_UNMAPPED_PPA;
+    }
+    unsigned int lpn = dmz_sect2blk(lba);
+    unsigned int ppn = dm_zftl_l2p_get(mapping_table, lpn);
+    return dmz_blk2sect(ppn);
+}
+
+int dm_zftl_set_by_bn(struct dm_zftl_mapping_table * mapping_table, sector_t lpn, sector_t ppn){
+    sector_t original_ppn;
+    original_ppn = mapping_table->l2p_table[lpn];
+    mapping_table->l2p_table[lpn] = ppn;
+    mapping_table->p2l_table[ppn] = lpn;
+
+    dm_zftl_invalidate_ppn(mapping_table, original_ppn);
+    dm_zftl_validate_ppn(mapping_table, ppn);
+    return 0;
+}
+
+int dm_zftl_set(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa){
+    sector_t lpn, ppn, original_ppn;
+    lpn = dmz_sect2blk(lba);
+    original_ppn = mapping_table->l2p_table[lpn];
+    ppn = dmz_sect2blk(ppa);
+    mapping_table->l2p_table[lpn] = ppn;
+    mapping_table->p2l_table[ppn] = lpn;
+    dm_zftl_invalidate_ppn(mapping_table, original_ppn);
+    dm_zftl_validate_ppn(mapping_table, ppn);
+    return 0;
+}
+
+int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_table,
+                                        unsigned int * lpn_array,
+                                        sector_t ppn,
+                                        unsigned int nr_block){
+    unsigned int i = 0;
+#if DM_ZFTL_MAPPING_DEBUG
+    printk(KERN_EMERG "L2P Update: LPN:%llu ==> PPN:%llu [%llu blocks]",
+            lpn_array[0],
+            ppn,
+            nr_block);
+#endif
+    //Change dev
+    for(i = 0; i < nr_block; ++i){
+        dm_zftl_lpn_set_dev(mapping_table, lpn_array[i], DM_ZFTL_BACKEND);
+        dm_zftl_set_by_bn(mapping_table, lpn_array[i], ppn + i);
+    }
+#if DM_ZFTL_USING_LEA_FTL
+    lsm_tree_update(mapping_table->lsm_tree,
+                    lpn_array,
+                    nr_block,
+                    ppn);
+#endif
+    return 0;
+}
+
+int dm_zftl_update_mapping_cache(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, sector_t nr_blocks){
+    int i;
+    for(i = 0; i < nr_blocks; ++i){
+        dm_zftl_lpn_set_dev(mapping_table, dmz_sect2blk(lba) + i, DM_ZFTL_CACHE);
+        dm_zftl_set(mapping_table, lba + (sector_t)i * dmz_blk2sect(1) , ppa + (sector_t)i * dmz_blk2sect(1));
+    }
+#if DM_ZFTL_MAPPING_DEBUG
+    printk(KERN_EMERG "L2P Update: LPN:%llu ==> PPN:%llu [%llu blocks]",
+           dmz_sect2blk(lba),
+           dmz_sect2blk(ppa),
+           nr_blocks);
+#endif
+    return 0;
+}
 
 unsigned int dm_zftl_l2p_get(struct dm_zftl_mapping_table * mapping_table, unsigned int lpn){
-    if(dm_zftl_lpn_is_in_cache(mapping_table, lpn)){
-        return mapping_table->l2p_table[lpn];
-    }else{
-        unsigned int ppn = lsm_tree_get_ppn(mapping_table->lsm_tree,
+
+#if DM_ZFTL_USING_LEA_FTL
+    unsigned int ppn = lsm_tree_get_ppn(mapping_table->lsm_tree,
                                             lpn);
         ppn = lsm_tree_predict_correct(mapping_table->p2l_table, lpn, ppn);
         if(ppn != mapping_table->l2p_table[lpn])
             printk(KERN_EMERG "[Get] predict err! => got:%llu wanted:%llu", ppn, mapping_table->l2p_table[lpn]);
         return ppn;
-    }
+#else
+    return mapping_table->l2p_table[lpn];
+#endif
+
 }
 
 
@@ -59,10 +479,18 @@ int dm_zftl_ppn_is_valid(struct dm_zftl_mapping_table * mapping_table, sector_t 
         return 0;
     return 1;
 }
+
 unsigned int dm_zftl_get_ppa_zone_id(struct dm_zftl_target * dm_zftl, sector_t ppa){
     struct zoned_dev *dev = dm_zftl_get_ppa_dev(dm_zftl, ppa);
     return ppa / dev->zone_nr_sectors;
 }
+
+
+
+
+
+
+
 
 
 struct zoned_dev * dm_zftl_get_ppa_dev(struct dm_zftl_target * dm_zftl, sector_t ppa){
@@ -76,8 +504,6 @@ sector_t dm_zftl_get_dev_addr(struct dm_zftl_target * dm_zftl, sector_t ppa){
     struct zoned_dev * dev = dm_zftl_get_ppa_dev(dm_zftl, ppa);
     return ppa - dev->zoned_metadata->addr_offset;
 }
-
-
 
 void dm_zftl_bio_endio(struct bio *bio, blk_status_t status)
 {
@@ -105,6 +531,18 @@ void dm_zftl_io_complete(struct bio* bio){
     spin_lock_irqsave(&context->lock_, flags);
     context->io_complete = DM_ZFTL_IO_COMPLETE;
     spin_unlock_irqrestore(&context->lock_, flags);
+
+    if(!dmz_bio_blocks(bio))
+        return;
+
+    unsigned int start = dmz_bio_block(bio);
+    unsigned int end = dmz_bio_blocks(bio) + start;
+    unsigned int i;
+    //BUG_ON(!dmz_bio_blocks(bio));
+    for(i = start; i < end; ++i) {
+        struct dm_zftl_l2p_frame *frame = dm_zftl_get_lpn_frame(context->target, dmz_bio_block(bio));
+        dm_zftl_unpin_frame(context->target->l2p_mem_pool, frame);
+    }//Try evict
 }
 
 int dm_zftl_iterate_devices(struct dm_target *ti,
@@ -120,137 +558,6 @@ int dm_zftl_iterate_devices(struct dm_target *ti,
     //printk(KERN_EMERG "Func: %pS at address: %px Return: %d\n", fn, fn, r);
     return r;
 }
-
-int dm_zftl_init_mapping_table(struct dm_zftl_target * dm_zftl){
-
-
-
-    dm_zftl->mapping_table = (struct dm_zftl_mapping_table *)vmalloc(sizeof(struct dm_zftl_mapping_table));
-    mutex_init(&dm_zftl->mapping_table->l2p_lock);
-    dm_zftl->mapping_table->l2p_table_sz = dmz_sect2blk(dm_zftl->capacity_nr_sectors);
-    dm_zftl->mapping_table->l2p_table = kvmalloc_array(dm_zftl->mapping_table->l2p_table_sz,
-                                                        sizeof(uint32_t), GFP_KERNEL | __GFP_ZERO);
-    dm_zftl->mapping_table->p2l_table = kvmalloc_array(dm_zftl->mapping_table->l2p_table_sz,
-                                                       sizeof(uint32_t), GFP_KERNEL | __GFP_ZERO);
-    dm_zftl->mapping_table->device_bitmap = kvmalloc_array( (dm_zftl->mapping_table->l2p_table_sz) / 8 + 1 ,
-                                                            sizeof(uint8_t), GFP_KERNEL | __GFP_ZERO);
-    dm_zftl->mapping_table->validate_bitmap = kvmalloc_array( (dm_zftl->mapping_table->l2p_table_sz) / 8 + 1 ,
-                                                            sizeof(uint8_t), GFP_KERNEL | __GFP_ZERO);
-    dm_zftl->mapping_table->lsm_tree = lsm_tree_init(dm_zftl->mapping_table->l2p_table_sz);
-    unsigned int ppn, lpn, i;
-    for(ppn = 0; ppn < dm_zftl->mapping_table->l2p_table_sz; ppn++){
-        lpn = ppn;
-        dm_zftl->mapping_table->l2p_table[lpn] = DM_ZFTL_UNMAPPED_PPA;
-        dm_zftl->mapping_table->p2l_table[ppn] = DM_ZFTL_UNMAPPED_LPA;
-        dm_zftl_invalidate_ppn(dm_zftl->mapping_table, ppn);
-        dm_zftl_lpn_set_dev(dm_zftl->mapping_table, lpn, DM_ZFTL_CACHE);
-    }
-
-
-    return 0;
-}
-
-
-
-sector_t dm_zftl_get(struct dm_zftl_mapping_table * mapping_table, sector_t lba){
-    sector_t ppa;
-    if((unsigned int)lba > mapping_table->l2p_table_sz){
-        ppa = DM_ZFTL_UNMAPPED_PPA;
-    }
-    unsigned int lpn = dmz_sect2blk(lba);
-    unsigned int ppn = dm_zftl_l2p_get(mapping_table, lpn);
-    return dmz_blk2sect(ppn);
-}
-
-int dm_zftl_set_by_bn(struct dm_zftl_mapping_table * mapping_table, sector_t lpn, sector_t ppn){
-    sector_t original_ppn;
-    original_ppn = mapping_table->l2p_table[lpn];
-    mapping_table->l2p_table[lpn] = ppn;
-    mapping_table->p2l_table[ppn] = lpn;
-    dm_zftl_invalidate_ppn(mapping_table, original_ppn);
-    dm_zftl_validate_ppn(mapping_table, ppn);
-    return 0;
-}
-
-int dm_zftl_set(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa){
-    sector_t lpn, ppn, original_ppn;
-    lpn = dmz_sect2blk(lba);
-    original_ppn = mapping_table->l2p_table[lpn];
-    ppn = dmz_sect2blk(ppa);
-    mapping_table->l2p_table[lpn] = ppn;
-    mapping_table->p2l_table[ppn] = lpn;
-    dm_zftl_invalidate_ppn(mapping_table, original_ppn);
-    dm_zftl_validate_ppn(mapping_table, ppn);
-    return 0;
-}
-
-int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_table,
-                                                    unsigned int * lpn_array,
-                                                    sector_t ppn,
-                                                    unsigned int nr_block){
-    unsigned int i = 0;
-#if DM_ZFTL_MAPPING_DEBUG
-    printk(KERN_EMERG "L2P Update: LPN:%llu ==> PPN:%llu [%llu blocks]",
-            lpn_array[0],
-            ppn,
-            nr_block);
-#endif
-
-    int buggy = 0;
-    //Change dev
-    for(i = 0; i < nr_block; ++i){
-
-
-        dm_zftl_lpn_set_dev(mapping_table, lpn_array[i], DM_ZFTL_BACKEND);
-        dm_zftl_set_by_bn(mapping_table, lpn_array[i], ppn + i);
-    }
-
-
-    lsm_tree_update(mapping_table->lsm_tree,
-                    lpn_array,
-                    nr_block,
-                    ppn);
-
-    //Do insert check
-//    int bug_on = 0;
-//    for(i = 0; i < nr_block; ++i){
-//        unsigned int cal_ppn = dmz_sect2blk(dm_zftl_get(mapping_table, dmz_blk2sect(lpn_array[i])));
-//        unsigned int cal_lsm_ppn = lsm_tree_get_ppn(mapping_table->lsm_tree,
-//                                                lpn_array[i]);
-//        if(cal_lsm_ppn != ppn + i){
-//            printk(KERN_EMERG "Mapping ERR[lsm]: LPN: %llu Get:%llu Expected:%llu",lpn_array[i], cal_lsm_ppn, ppn + i);
-//            bug_on = 1;
-//        }
-//        if(cal_ppn != ppn + i){
-//            printk(KERN_EMERG "Mapping ERR: LPN: %llu Get:%llu Expected:%llu",lpn_array[i], cal_ppn, ppn + i);
-//            bug_on = 1;
-//        }
-//    }
-//    if(bug_on){
-//        printk(KERN_EMERG "Mapping Error");
-//    }
-//    BUG_ON(bug_on);
-
-
-    return 0;
-}
-
-
-int dm_zftl_update_mapping_cache(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, sector_t nr_blocks){
-    int i;
-    for(i = 0; i < nr_blocks; ++i){
-        dm_zftl_lpn_set_dev(mapping_table, dmz_sect2blk(lba) + i, DM_ZFTL_CACHE);
-        dm_zftl_set(mapping_table, lba + (sector_t)i * dmz_blk2sect(1) , ppa + (sector_t)i * dmz_blk2sect(1));
-    }
-#if DM_ZFTL_MAPPING_DEBUG
-    printk(KERN_EMERG "L2P Update: LPN:%llu ==> PPN:%llu [%llu blocks]",
-           dmz_sect2blk(lba),
-           dmz_sect2blk(ppa),
-           nr_blocks);
-#endif
-    return 0;
-}
-
 
 sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, sector_t len){
     sector_t wp;
@@ -283,8 +590,6 @@ sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, sector_t len){
     goto try_get_wp;
 
 }
-
-
 /*
  * Initialize the bio context
  */
@@ -476,8 +781,6 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
     return ret;
 }
 
-
-
 /*
  * Handle IO
  * */
@@ -574,9 +877,6 @@ void dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
     out:
     dm_zftl_bio_endio(bio, errno_to_blk_status(ret));
 }
-
-
-
 /*
  *
  * IO work fn
@@ -587,13 +887,12 @@ static void dm_zftl_io_work_(struct work_struct *work){
     struct bio * io = io_work->bio_ctx;
     dm_zftl_handle_bio(io_work->target, io_work, io);
 }
-
 /*
  *
  * Queue io
  *
  * */
-static int dm_zftl_queue_io(struct dm_zftl_target *dm_zftl, struct bio *bio){
+int dm_zftl_queue_io(struct dm_zftl_target *dm_zftl, struct bio *bio){
     struct dm_zftl_io_work * io_work = kmalloc(sizeof(struct dm_zftl_io_work), GFP_NOIO);
     INIT_WORK(&io_work->work, dm_zftl_io_work_);
     io_work->bio_ctx = bio;
@@ -619,6 +918,9 @@ static int dm_zftl_map(struct dm_target *ti, struct bio *bio)
 
     if (!nr_sectors && bio_op(bio) != REQ_OP_WRITE)
         return DM_MAPIO_REMAPPED;
+
+    if(!dmz_bio_blocks(bio))
+        return DM_MAPIO_SUBMITTED;
 
 
     /* The BIO should be block aligned */
@@ -653,7 +955,8 @@ static int dm_zftl_map(struct dm_target *ti, struct bio *bio)
     }
 
     /* Now ready to handle this BIO */
-    ret = dm_zftl_queue_io(dm_zftl, bio);
+    dm_zftl_try_l2p_pin(dm_zftl, bio);
+
     ret = 0;
     if (ret) {
         printk(KERN_EMERG
@@ -894,6 +1197,10 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     ret = dm_zftl_open_new_zone(dmz->zone_device);
     ret = dm_zftl_init_mapping_table(dmz);
     ret = dm_zftl_init_copy_buffer(dmz);
+
+
+    //make sure init after mapping table init
+    dm_zftl_l2p_set_init(dmz);
     dmz->io_client = dm_io_client_create();
 
 
@@ -937,6 +1244,20 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
         goto err_dev;
     }
 
+    dmz->l2p_pin_wq = alloc_ordered_workqueue("dmz_zftl_pin", WQ_MEM_RECLAIM, 0);
+    if (!dmz->l2p_pin_wq) {
+        ti->error = "Create pin io workqueue failed";
+        ret = -ENOMEM;
+        goto err_dev;
+    }
+
+    dmz->l2p_page_out_wq = alloc_ordered_workqueue("dmz_zftl_page_out", WQ_MEM_RECLAIM, 0);
+    if (!dmz->l2p_page_out_wq) {
+        ti->error = "Create page out io workqueue failed";
+        ret = -ENOMEM;
+        goto err_dev;
+    }
+
     //dmz->reclaim_work = vmalloc(sizeof(struct dm_zftl_reclaim_read_work));
     //dmz->reclaim_work->target = dmz;
     //INIT_DELAYED_WORK(&dmz->reclaim_work->work, dm_zftl_reclaim_read_work);
@@ -954,6 +1275,11 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     dmz->total_write_traffic_sec_ = 0;
     dmz->last_write_traffic_ = 0;
     dmz->last_compact_traffic_ = 0;
+
+
+    dmz->dummy_l2p_buffer = vmalloc(8192);
+    if(!dmz->dummy_l2p_buffer)
+        goto err_dev;
 
 
     ti->max_io_len = dmz->zone_device->zone_nr_sectors;
@@ -1006,6 +1332,17 @@ static struct target_type dm_zftl_type = {
 };
 
 
+
+
+struct zoned_dev * dm_zftl_get_foregound_io_dev(struct dm_zftl_target * dm_zftl){
+    /* Do we need this ? */
+//    if(atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_free_zone) <= DM_ZFTL_FULL_THRESHOLD){
+//        printk(KERN_EMERG "Cache dev full. Now foregound io switch to ZNS");
+//        return dm_zftl->zone_device;
+//    }
+    return dm_zftl->cache_device;
+}
+
 int dm_zftl_open_new_zone(struct zoned_dev * dev){
 
     if(atomic_read(&dev->zoned_metadata->nr_free_zone) == 0)
@@ -1050,17 +1387,6 @@ int dm_zftl_reset_all(struct zoned_dev * dev){
 #endif
     return 0;
 }
-
-
-struct zoned_dev * dm_zftl_get_foregound_io_dev(struct dm_zftl_target * dm_zftl){
-    /* Do we need this ? */
-//    if(atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_free_zone) <= DM_ZFTL_FULL_THRESHOLD){
-//        printk(KERN_EMERG "Cache dev full. Now foregound io switch to ZNS");
-//        return dm_zftl->zone_device;
-//    }
-    return dm_zftl->cache_device;
-}
-
 /*
  *
  * Reset a zone write pointer.
