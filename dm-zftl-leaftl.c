@@ -96,7 +96,7 @@ void lsm_tree_insert(struct segment * seg, struct lsm_tree * lsm_tree){
         overlap_segs = lsm_tree_insert_segs_to_level_(overlap_segs, new_level);
         BUG_ON(overlap_segs);
     }
-    lsm_tree_promote(lsm_tree);
+    //lsm_tree_promote(lsm_tree);
 }
 
 
