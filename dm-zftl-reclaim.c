@@ -10,7 +10,6 @@
 void dm_zftl_lsm_tree_try_compact(struct dm_zftl_target * dm_zftl){
     if((dm_zftl->last_compact_traffic_ >= DM_ZFTL_COMPACT_INTERVAL) && DM_ZFTL_COMPACT_ENABLE){
 
-
 #if DM_ZFTL_COMPACT_DEBUG
         printk(KERN_EMERG "[Compact] Trigger Compact");
 #endif
@@ -309,7 +308,7 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
     dm_zftl->last_compact_traffic_ += job->nr_blocks;
     spin_unlock_irqrestore(&dm_zftl->record_lock_, flags);
 
-    dm_zftl_lsm_tree_try_compact(dm_zftl);
+    //dm_zftl_lsm_tree_try_compact(dm_zftl);
 
     return 1;
 }

@@ -57,15 +57,16 @@
 #define DM_ZFTL_READ_SPLIT 1
 #define DM_ZFTL_EXPOSE_TYPE BLK_ZONED_NONE
 #define DM_ZFTL_MAPPING_DEBUG 0
-#define DM_ZFTL_DEBUG 1
+#define DM_ZFTL_DEBUG 0
 #define DM_ZFTL_MIN_BIOS 8192
 #define BDEVNAME_SIZE 256
-#define DM_ZFTL_COMPACT_ENABLE 0
+#define DM_ZFTL_COMPACT_ENABLE 1
 #define DM_ZFTL_COMPACT_INTERVAL 50 * 1024 //50 * 4MB = 200MB
 /*
  * Creates block devices with 4KB blocks, always.
  * copy from dm-zoned
  */
+#define DM_ZFTL_L2P_PIN 0
 #define DMZ_BLOCK_SHIFT		12
 #define DMZ_BLOCK_SIZE		(1 << DMZ_BLOCK_SHIFT)
 #define DMZ_BLOCK_MASK		(DMZ_BLOCK_SIZE - 1)
@@ -391,6 +392,7 @@ struct l2p_pin_work{
     struct work_struct work;
     struct bio * bio;
     int total_l2p_page;
+    unsigned int wanted_free_space;
     atomic_t pinned_cnt;
     atomic_t deferred_cnt;
     TAILQ_HEAD(_deferred_pin_list, dm_zftl_l2p_frame) _deferred_pin_list;
@@ -432,4 +434,6 @@ void dm_zftl_invalidate_ppn(struct dm_zftl_mapping_table * mapping_table, sector
 void dm_zftl_validate_ppn(struct dm_zftl_mapping_table * mapping_table, sector_t ppn);
 void dm_zftl_l2p_evict_cb(unsigned long error, void * context);
 void dm_zftl_do_evict(struct work_struct *work);
+unsigned int dm_zftl_sftl_get_size(struct dm_zftl_mapping_table * mapping_table);
+void dm_zftl_try_evict(struct dm_zftl_target * dm_zftl, struct dm_zftl_l2p_mem_pool * l2p_cache);
 #endif //DM_ZFTL_DM_ZFTL_H

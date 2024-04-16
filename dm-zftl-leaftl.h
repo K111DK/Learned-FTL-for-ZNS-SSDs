@@ -55,7 +55,7 @@ struct segment {
     unsigned int start_lpn;
     frac_fp slope;
     frac_fp intercept;
-    unsigned int len;
+    unsigned int len;//dose not include start_lpn
     int is_acc_seg;
     int valid_tag;
     struct segment * next;
@@ -193,8 +193,9 @@ unsigned int lsm_tree_cal_ppn_original__(struct segment * seg,
 int lsm_tree_CRB_search_lpn_(struct conflict_resolution_buffer * CRB,
                              unsigned int lpn);
 
+void lsm_tree_update_seq(struct lsm_tree * lsm_tree, unsigned int start_lpn, int len, unsigned int start_ppn);
+void lsm_tree_update_by_lpn_array(struct lsm_tree * lsm_tree, unsigned int * lpn_array, int len, unsigned int start_ppn);
 
-struct segment * lsm_tree_update(struct lsm_tree * lsm_tree, unsigned int * lpn_array, int len, unsigned int start_ppn);
 struct segment * Regression(unsigned int * lpn_array, int len, unsigned int start_ppn);
 void lsm_tree_level_wise_compact__(struct lsm_tree_level * upper_level, struct lsm_tree_level * lower_level);
 
@@ -216,7 +217,7 @@ struct conflict_resolution_buffer * gen_CRB(const unsigned int * lpn_array, int 
 
 
 
-#define SIZE_CALCULATE_REAL 1 //Calculate with struct size
+#define SIZE_CALCULATE_REAL 0 //Calculate with struct size
 #define SIZE_LPN_BYTES 4
 #define SIZE_INTERCEPTION_BYTES SIZE_START_LPN_BYTES
 #define SIZE_START_LPN_BYTES 1

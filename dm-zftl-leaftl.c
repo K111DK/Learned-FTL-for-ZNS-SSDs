@@ -519,7 +519,7 @@ unsigned int lsm_tree_get_ppn(struct lsm_tree * lsm_tree, unsigned int lpn){
         level = level->next_level;
     }
     UNMAPPED:
-    return ~((unsigned int )0);
+    return DM_ZFTL_UNMAPPED_PPA;
 }
 
 int lsm_tree_CRB_search_lpn_(struct conflict_resolution_buffer * CRB,
@@ -573,10 +573,44 @@ unsigned int lsm_tree_cal_ppn_original__(struct segment * seg,
     return seg->slope * lpn + seg->intercept;
 #endif
 }
+void lsm_tree_update_seq(struct lsm_tree * lsm_tree, unsigned int start_lpn, int len, unsigned int start_ppn) {
+    unsigned int i = 0;
+    unsigned int pre_lpn = start_lpn;
+    struct segment * segs;
+    unsigned int pre_frame = start_lpn / DM_ZFTL_FRAME_LENGTH;
+    for(i = start_lpn; i < start_lpn + len; ++i){
+        unsigned int curr_frame = (start_lpn + i) / DM_ZFTL_FRAME_LENGTH;
+        if(curr_frame != pre_frame) {
+            segs = MALLOC(sizeof (struct segment));
+            segs->CRB = NULL;
+            segs->next = NULL;
+            segs->start_lpn = pre_lpn;
+            segs->len = i - pre_lpn - 1;
+            segs->slope.denominator = 1;
+            segs->slope.numerator = 1;
+            segs->intercept.numerator = start_ppn + pre_lpn - start_lpn - segs->start_lpn;
+            segs->intercept.denominator = 1;
+            segs->is_acc_seg = 1;
+            lsm_tree_insert(segs,
+                            lsm_tree);
+        }
+    }
+    segs = MALLOC(sizeof (struct segment));
+    segs->is_acc_seg = 1;
+    segs->CRB = NULL;
+    segs->next = NULL;
+    segs->start_lpn = pre_lpn;
+    segs->len = i - pre_lpn - 1;
+    segs->slope.denominator = 1;
+    segs->slope.numerator = 1;
+    segs->intercept.numerator = start_ppn + pre_lpn - start_lpn - segs->start_lpn;
+    segs->intercept.denominator = 1;
+    lsm_tree_insert(segs,
+                    lsm_tree);
+    return;
+}
 
-
-
-struct segment * lsm_tree_update(struct lsm_tree * lsm_tree, unsigned int * lpn_array, int len, unsigned int start_ppn){
+void lsm_tree_update_by_lpn_array(struct lsm_tree * lsm_tree, unsigned int * lpn_array, int len, unsigned int start_ppn){
     int i = 0;
     int pre_index = 0;
     struct segment * cp;
@@ -596,7 +630,7 @@ struct segment * lsm_tree_update(struct lsm_tree * lsm_tree, unsigned int * lpn_
     segs = Regression(lpn_array + pre_index, i - pre_index, wp);
     lsm_tree_insert(segs,
                     lsm_tree);
-    return NULL;
+    return;
 }
 
 struct segment * Regression(unsigned int * lpn_array, int len, unsigned int start_ppn){
