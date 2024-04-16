@@ -9,6 +9,7 @@
 
 void dm_zftl_lsm_tree_try_compact(struct dm_zftl_target * dm_zftl){
     if((dm_zftl->last_compact_traffic_ >= DM_ZFTL_COMPACT_INTERVAL) && DM_ZFTL_COMPACT_ENABLE){
+        mutex_lock(&dm_zftl->mapping_table->l2p_lock);
 
 #if DM_ZFTL_COMPACT_DEBUG
         printk(KERN_EMERG "[Compact] Trigger Compact");
@@ -27,6 +28,7 @@ void dm_zftl_compact_work(struct work_struct *work){
     struct dm_zftl_compact_work * _work = container_of(work, struct dm_zftl_compact_work, work);
     struct dm_zftl_target * dm_zftl = _work->target;
     lsm_tree_compact(dm_zftl->mapping_table->lsm_tree);
+    mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
 }
 
 void dm_zftl_zns_try_gc(struct dm_zftl_target * dm_zftl){
@@ -277,8 +279,8 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
     iorq.bi_op_flags = 0;
     iorq.mem.type = DM_IO_VMA;
     iorq.mem.ptr.vma = dm_zftl_get_buffer_block_addr(dm_zftl, 0);
-    iorq.notify.fn = NULL;
-    iorq.notify.context = NULL;
+    iorq.notify.fn = dm_zftl_valid_data_writeback_cb;
+    iorq.notify.context = dm_zftl;
     iorq.client = dm_zftl->io_client;
 
     ret = dm_io(&iorq, 1, where, error_bits);
@@ -299,16 +301,13 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
     job->writeback_to->zoned_metadata->opened_zoned->wp += nr_sectors;
     atomic_dec(&dm_zftl->nr_reclaim_work);
 
-    dm_zftl_valid_data_writeback_cb(0, (void *)dm_zftl);
-
-
     unsigned int flags;
     spin_lock_irqsave(&dm_zftl->record_lock_, flags);
     dm_zftl->cache_2_zns_reclaim_write_traffic_ += job->nr_blocks;
     dm_zftl->last_compact_traffic_ += job->nr_blocks;
     spin_unlock_irqrestore(&dm_zftl->record_lock_, flags);
 
-    //dm_zftl_lsm_tree_try_compact(dm_zftl);
+    dm_zftl_lsm_tree_try_compact(dm_zftl);
 
     return 1;
 }

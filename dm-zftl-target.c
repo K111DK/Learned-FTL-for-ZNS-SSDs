@@ -754,6 +754,7 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
         //spin_unlock_irqrestore(&read_io->lock_, read_io->flag);
     }
     dm_zftl_io_complete(bio);
+    dm_zftl_bio_endio(bio, errno_to_blk_status(0));
     return DM_MAPIO_SUBMITTED;
 }
 
@@ -761,6 +762,8 @@ void dm_zftl_dm_io_write_cb(unsigned long error, void * context){
     struct dm_zftl_io_work * io_work =(struct dm_zftl_io_work *) context;
     struct bio * bio = io_work->bio_ctx;
     struct dm_zftl_target * dm_zftl = io_work->target;
+    dm_zftl_io_complete(bio);
+    dm_zftl_bio_endio(bio, errno_to_blk_status(0));
 //    clear_bit_unlock(DMZAP_WR_OUTSTANDING, &dm_zftl->zone_device->write_bitmap);
 }
 
@@ -814,7 +817,7 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
     iorq.bi_op_flags = REQ_SYNC;
     iorq.mem.type = DM_IO_BIO;
     iorq.mem.ptr.bio = bio;
-    iorq.notify.fn = NULL;
+    iorq.notify.fn = dm_zftl_dm_io_write_cb;
     iorq.notify.context = context;
     iorq.client = dm_zftl->io_client;
 
@@ -823,9 +826,10 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
     //return dm_io(&iorq, 1, where, NULL);
     dm_io(&iorq, 1, where, NULL);
     ret = DM_MAPIO_SUBMITTED;
-
+    return ret;
 
     FINISH:
+    ret = DM_MAPIO_SUBMITTED;
     dm_zftl_io_complete(bio);
     return ret;
 }
@@ -837,15 +841,11 @@ void dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
                      struct dm_zftl_io_work *io, struct bio *bio){
     int ret;
 
-//    if (dmzap->dev->flags & DMZ_BDEV_DYING) {
-//        ret = -EIO;
-//        goto out;
-//    }
 
     if (!bio_sectors(bio)) {
         dm_zftl_io_complete(bio);
-        ret = DM_MAPIO_SUBMITTED;
-        goto out;
+        dm_zftl_bio_endio(bio, errno_to_blk_status(0));
+        return;
     }
 
     /*
@@ -900,10 +900,11 @@ void dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
         case REQ_OP_DISCARD:
         case REQ_OP_WRITE_ZEROES:
             dm_zftl_io_complete(bio);
-            ret = DM_MAPIO_SUBMITTED;
+            dm_zftl_bio_endio(bio, errno_to_blk_status(0));
             break;
         default:
             dm_zftl_io_complete(bio);
+            dm_zftl_bio_endio(bio, errno_to_blk_status(0));
             printk(KERN_EMERG "Ignoring unsupported BIO operation 0x%x",
                         bio_op(bio));
             ret = -EIO;
@@ -922,9 +923,6 @@ void dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
     }
     spin_unlock_irqrestore(&dm_zftl->record_lock_, flags);
 
-
-    out:
-    dm_zftl_bio_endio(bio, errno_to_blk_status(ret));
 }
 /*
  *
