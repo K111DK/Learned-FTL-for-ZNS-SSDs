@@ -9,7 +9,6 @@
 
 void dm_zftl_lsm_tree_try_compact(struct dm_zftl_target * dm_zftl){
     if((dm_zftl->last_compact_traffic_ >= DM_ZFTL_COMPACT_INTERVAL) && DM_ZFTL_COMPACT_ENABLE){
-        mutex_lock(&dm_zftl->mapping_table->l2p_lock);
 
 #if DM_ZFTL_COMPACT_DEBUG
         printk(KERN_EMERG "[Compact] Trigger Compact");
@@ -28,7 +27,6 @@ void dm_zftl_compact_work(struct work_struct *work){
     struct dm_zftl_compact_work * _work = container_of(work, struct dm_zftl_compact_work, work);
     struct dm_zftl_target * dm_zftl = _work->target;
     lsm_tree_compact(dm_zftl->mapping_table->lsm_tree);
-    mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
 }
 
 void dm_zftl_zns_try_gc(struct dm_zftl_target * dm_zftl){
@@ -96,6 +94,7 @@ void dm_zftl_do_foreground_reclaim(struct work_struct *work){
 }
 
 void dm_zftl_do_reclaim(struct work_struct *work, struct zoned_dev *reclaim_from, struct zoned_dev *copy_to){
+
     struct dm_zftl_reclaim_read_work * read_work = container_of(work, struct dm_zftl_reclaim_read_work, work);
     struct dm_zftl_target * dm_zftl = read_work->target;
 
@@ -106,6 +105,7 @@ void dm_zftl_do_reclaim(struct work_struct *work, struct zoned_dev *reclaim_from
     spin_lock_init(&cp_job->lock_);
 
     mutex_lock(&dm_zftl->mapping_table->l2p_lock);
+
     int ret;
     unsigned int reclaim_zone_id = dm_zftl_get_reclaim_zone(cp_job->copy_from, dm_zftl->mapping_table);
 
@@ -127,7 +127,7 @@ void dm_zftl_do_reclaim(struct work_struct *work, struct zoned_dev *reclaim_from
     return;
 
     OUT:
-    mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
+    return;
 }
 
 struct zoned_dev * dm_zftl_get_background_io_dev(struct dm_zftl_target * dm_zftl){
@@ -222,6 +222,7 @@ void dm_zftl_write_back_(struct work_struct *work){
 
 void dm_zftl_valid_data_writeback_cb(unsigned long error, void * context){
     struct dm_zftl_target* dm_zftl = (struct dm_zftl_target *)context;
+    clear_bit_unlock(DMZAP_WR_OUTSTANDING, &dm_zftl->zone_device->write_bitmap);
     mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
 }
 
@@ -232,6 +233,11 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
     sector_t nr_sectors = dmz_blk2sect(job->nr_blocks);
     struct dm_io_region * where = (struct dm_io_region *)vmalloc(sizeof (struct dm_io_region));
     sector_t start_ppa = dm_zftl_get_seq_wp(dev, nr_sectors);
+
+    /* We can only have one outstanding write at a time */
+    while(test_and_set_bit_lock(DMZAP_WR_OUTSTANDING,
+                                &dm_zftl->zone_device->write_bitmap))
+        io_schedule();
 
     if(start_ppa == DM_ZFTL_UNMAPPED_PPA){
         printk(KERN_EMERG "[Reclaim] Fatal: no free space for wriite back valid data");
@@ -264,6 +270,7 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
                                         dm_zftl->buffer->lpn_buffer,
                                         dmz_sect2blk(start_ppa),
                                         job->nr_blocks);
+
 
 #if DM_ZFTL_RECLAIM_DEBUG
 
@@ -298,10 +305,15 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
     //TODO:Fix metadata update and zone reset
     dm_zftl_reset_zone(job->copy_from, reclaim_zone);
 
+    unsigned long flags;
+
+    spin_lock_irqsave(&job->writeback_to->zoned_metadata->opened_zoned->lock_, flags);
     job->writeback_to->zoned_metadata->opened_zoned->wp += nr_sectors;
+    spin_unlock_irqrestore(&job->writeback_to->zoned_metadata->opened_zoned->lock_, flags);
+
+
     atomic_dec(&dm_zftl->nr_reclaim_work);
 
-    unsigned int flags;
     spin_lock_irqsave(&dm_zftl->record_lock_, flags);
     dm_zftl->cache_2_zns_reclaim_write_traffic_ += job->nr_blocks;
     dm_zftl->last_compact_traffic_ += job->nr_blocks;
@@ -315,6 +327,7 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
 
 int dm_zftl_read_valid_zone_data_to_buffer(struct dm_zftl_target * dm_zftl, struct copy_job * cp_job, unsigned int zone_id){
 
+
     struct zoned_dev * dev = cp_job->copy_from;
 
     unsigned int start_ppn = dm_zftl_get_zone_start_vppn(dev, zone_id);
@@ -327,6 +340,7 @@ int dm_zftl_read_valid_zone_data_to_buffer(struct dm_zftl_target * dm_zftl, stru
     unsigned int i;
     unsigned int current_lpn_buffer_idx = 0;
     unsigned int lp;
+
     //Find all vaild blocks in reclaim zone
     for(i = start_ppn; i < end_ppn; ++i){
 

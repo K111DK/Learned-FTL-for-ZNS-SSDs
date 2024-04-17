@@ -47,7 +47,7 @@
 #define DM_ZFTL_RECLAIM_THRESHOLD 10
 #define DM_ZFTL_RECLAIM_INTERVAL 200 * MB
 #define DM_ZFTL_RECLAIM_DEBUG 0
-#define DM_ZFTL_RECLAIM_MAX_READ_NUM_DEFAULT 3
+#define DM_ZFTL_RECLAIM_MAX_READ_NUM_DEFAULT 1
 
 #define DM_ZFTL_DEV_STR(dev) dm_zftl_is_cache(dev) ? "Cache" : "ZNS"
 #define DM_ZFTL_RECLAIM_PERIOD	(1 * HZ)
@@ -380,7 +380,6 @@ struct zoned_dev * dm_zftl_get_ppa_dev(struct dm_zftl_target * dm_zftl, sector_t
 void dm_zftl_write_back_(struct work_struct *work);
 void dm_zftl_compact_work(struct work_struct *work);
 void dm_zftl_lsm_tree_try_compact(struct dm_zftl_target * dm_zftl);
-void dm_zftl_zns_try_gc(struct dm_zftl_target * dm_zftl);
 int dm_zftl_need_gc(struct dm_zftl_target * dm_zftl);
 
 
