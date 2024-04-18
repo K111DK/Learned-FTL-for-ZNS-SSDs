@@ -47,7 +47,12 @@ struct lsm_tree * lsm_tree_init(unsigned int total_blocks){
     struct lsm_tree * tree = MALLOC(sizeof(struct lsm_tree));
 
     unsigned int total_frame = total_blocks / 256 + 1;
-    struct lsm_tree_frame * frame = MALLOC_ARRAY(total_frame, sizeof(struct  lsm_tree_frame));
+    struct lsm_tree_frame * frame = kvmalloc_array(total_frame, sizeof(struct  lsm_tree_frame), GFP_KERNEL | __GFP_ZERO);
+    if(!frame) {
+        printk(KERN_EMERG "Try to alloc %u B", total_frame * sizeof(struct lsm_tree_frame));
+        BUG_ON(!frame);
+    }
+
     tree->nr_frame = total_frame;
     tree->frame = frame;
 

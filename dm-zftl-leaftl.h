@@ -25,8 +25,8 @@ enum {
     DEL_SEG = 2
 };
 
-#define MALLOC(size) kmalloc(size, GFP_NOIO)
-#define FREE(mem) kfree(mem)
+#define MALLOC(size) kvmalloc(size, GFP_NOIO)
+#define FREE(mem) kvfree(mem)
 #define MALLOC_ARRAY(num, size) kvmalloc_array(num, size, GFP_KERNEL | __GFP_ZERO)
 #define DM_ZFTL_FRAME_LENGTH 256
 #define DM_ZFTL_FRAME_LENGTH_BITS (DM_ZFTL_FRAME_LENGTH / 8)
