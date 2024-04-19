@@ -41,9 +41,9 @@
 #define KB 2 /* in sectors */
 #define MB 1024 * KB
 #define GB 1024 * MB
-
+#define DM_ZFTL_PIN_DEBUG 0
 #define DM_ZFTL_VMA_COPY_TEST 0
-#define DM_ZFTL_RECLAIM_ENABLE 0
+#define DM_ZFTL_RECLAIM_ENABLE 1
 #define DM_ZFTL_RECLAIM_THRESHOLD 10
 #define DM_ZFTL_RECLAIM_INTERVAL 200 * MB
 #define DM_ZFTL_RECLAIM_DEBUG 0
@@ -66,7 +66,7 @@
  * Creates block devices with 4KB blocks, always.
  * copy from dm-zoned
  */
-#define DM_ZFTL_L2P_PIN 1
+#define DM_ZFTL_L2P_PIN 0
 #define DMZ_BLOCK_SHIFT		12
 #define DMZ_BLOCK_SIZE		(1 << DMZ_BLOCK_SHIFT)
 #define DMZ_BLOCK_MASK		(DMZ_BLOCK_SIZE - 1)
@@ -162,11 +162,11 @@ struct dm_zftl_compact_work{
 
 struct dm_zftl_l2p_frame{
     TAILQ_ENTRY(dm_zftl_l2p_frame) list_entry;
-    int on_lru_list;
     unsigned int frame_no;
-    atomic_t state;
-    spinlock_t _lock;
+    int state;
+    atomic_t on_lru_list;
     atomic_t ref_count;
+    spinlock_t _lock;
 };
 
 struct dm_zftl_l2p_mem_pool{
@@ -424,7 +424,9 @@ enum {
     READY,// this frame is in DRAM
     IN_PROC, // this frame is being loading
     INIT, // this frame no in DRAM, and no other io is loading it
-    FLUSHING //
+    FLUSHING, //
+    ON_DISK,
+    ON_DRAM
 };
 struct l2p_page_in_work{
     struct work_struct work;
@@ -444,7 +446,7 @@ struct l2p_page_out_work{
 void dm_zftl_unpin(struct l2p_pin_work * pin_work_ctx);
 struct dm_zftl_l2p_frame * dm_zftl_create_new_frame(unsigned int frame_no);
 int dm_zftl_is_pin_complete(struct l2p_pin_work * pin_ctx);
-int dm_zftl_try_l2p_pin(struct io_job * io_job);
+int dm_zftl_try_l2p_pin(struct dm_zftl_target * dm_zftl, struct io_job * io_job);
 int dm_zftl_l2p_pin_complete(struct l2p_pin_work * pin_work);
 int dm_zftl_queue_l2p_pin_io(struct l2p_pin_work * pin_work_ctx);
 void dm_zftl_do_l2p_pin_io(struct work_struct *work);
@@ -470,6 +472,7 @@ void dm_zftl_try_evict(struct dm_zftl_target * dm_zftl, struct dm_zftl_l2p_mem_p
 struct dm_zftl_io_work * dm_zftl_get_io_work(struct dm_zftl_target *dm_zftl, struct bio *bio);
 int dm_zftl_cmp_(const void *a,const void *b);
 int dm_zftl_get_sorted_vaild_lpn(struct copy_job * cp_job);
+struct l2p_pin_work * dm_zftl_init_pin_ctx(struct dm_zftl_target * dm_zftl, struct io_job * io_job);
 #define DM_ZFTL_PAGE_SIZE (4096)// in bytes
 
 

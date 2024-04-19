@@ -151,6 +151,12 @@ int dm_zftl_get_sorted_vaild_lpn(struct copy_job * cp_job){
     cp_job->nr_blocks = current_lpn_buffer_idx;
     cp_job->nr_read_complete = 0;
     cp_job->read_complete = 0;
+    cp_job->lpn_start_idx = 0;
+    cp_job->nr_read_io = current_lpn_buffer_idx;
+    cp_job->cp_lpn_array = dm_zftl->buffer->lpn_buffer;
+#if DM_ZFTL_RECLAIM_DEBUG
+    printk(KERN_EMERG "[Reclaim] sort done!");
+#endif
 
     return 0;
 
@@ -168,10 +174,9 @@ void dm_zftl_do_reclaim(struct work_struct *work, struct zoned_dev *reclaim_from
     cp_job->copy_from = reclaim_from;
     cp_job->writeback_to = copy_to;
 
-    cp_job->pin_cb_fn = dm_zftl_read_valid_zone_data_to_buffer;
-    cp_job->pin_cb_ctx = (void *) cp_job;
 
     spin_lock_init(&cp_job->lock_);
+
     mutex_lock(&dm_zftl->mapping_table->l2p_lock);
 
     unsigned int reclaim_zone_id = dm_zftl_get_reclaim_zone(cp_job->copy_from, dm_zftl->mapping_table);
@@ -183,13 +188,19 @@ void dm_zftl_do_reclaim(struct work_struct *work, struct zoned_dev *reclaim_from
     if(dm_zftl_get_sorted_vaild_lpn(cp_job))
         goto ERR_OUT;
 
+
+
     cp_job->pin_cb_fn = dm_zftl_read_valid_zone_data_to_buffer;
     cp_job->pin_cb_ctx = (void *)cp_job;
     struct io_job * io_job = kmalloc(sizeof(struct io_job), GFP_NOIO);
     io_job->cp_job = cp_job;
     io_job->flags = CP_JOB;
 
-    dm_zftl_try_l2p_pin(io_job);
+#if DM_ZFTL_L2P_PIN
+    dm_zftl_try_l2p_pin(dm_zftl, io_job);
+#else
+    cp_job->pin_cb_fn(cp_job->pin_cb_ctx);
+#endif
 
     return;
 
@@ -277,8 +288,6 @@ void dm_zftl_copy_read_cb(unsigned long error, void * context){
         );
 #endif
 
-
-        //do pin work
         INIT_WORK(&job->work, dm_zftl_write_back_);
         //once all vaild block read to VMA, kick off write
         queue_work(job->dm_zftl->reclaim_write_wq, &job->work);
@@ -292,9 +301,14 @@ void dm_zftl_write_back_(struct work_struct *work){
 
 
 void dm_zftl_valid_data_writeback_cb(unsigned long error, void * context){
-    struct dm_zftl_target* dm_zftl = (struct dm_zftl_target *)context;
+    struct copy_job * cp_job = context;
+    struct dm_zftl_target * dm_zftl = cp_job->dm_zftl;
     clear_bit_unlock(DMZAP_WR_OUTSTANDING, &dm_zftl->zone_device->write_bitmap);
     mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
+#if DM_ZFTL_L2P_PIN
+    dm_zftl_unpin(cp_job->pin_work_ctx);
+#endif
+
 }
 
 
@@ -343,7 +357,7 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
                                         job->nr_blocks);
 
     //we can do unpin now
-    dm_zftl_unpin(job->pin_work_ctx);
+
 
 
 #if DM_ZFTL_RECLAIM_DEBUG
@@ -359,7 +373,7 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
     iorq.mem.type = DM_IO_VMA;
     iorq.mem.ptr.vma = dm_zftl_get_buffer_block_addr(dm_zftl, 0);
     iorq.notify.fn = dm_zftl_valid_data_writeback_cb;
-    iorq.notify.context = dm_zftl;
+    iorq.notify.context = job;
     iorq.client = dm_zftl->io_client;
 
     ret = dm_io(&iorq, 1, where, error_bits);
@@ -399,16 +413,16 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
 
 void dm_zftl_read_valid_zone_data_to_buffer(void * context){
 
+
     struct copy_job * cp_job = context;
 
 #if DM_ZFTL_RECLAIM_DEBUG
     printk(KERN_EMERG "[Reclaim][Read] dev:%s zone:%llu, Validate [ %llu / %llu ]",
             DM_ZFTL_DEV_STR(cp_job->copy_from),
             cp_job->reclaim_zone_id,
-            current_lpn_buffer_idx,
+            cp_job->nr_read_io,
             cp_job->copy_from->zone_nr_blocks);
 #endif
-
 
     struct dm_io_region * where = kvmalloc_array(cp_job->nr_read_io,
                                                  sizeof(struct dm_io_region), GFP_KERNEL | __GFP_ZERO);
@@ -522,7 +536,8 @@ unsigned int dm_zftl_get_reclaim_zone(struct zoned_dev * dev, struct dm_zftl_map
                 , reclaim_zone_id
                 , reclaim_zone_id * dev->zone_nr_blocks
                 , (reclaim_zone_id + 1) * dev->zone_nr_blocks);
-        printk(KERN_EMERG "Remaing full zone:%d", atomic_read(&dev->zoned_metadata->nr_full_zone));
+        printk(KERN_EMERG "Remaing full zone:%d Remaing free zone:%d", atomic_read(&dev->zoned_metadata->nr_full_zone),
+                                                                        atomic_read(&dev->zoned_metadata->nr_free_zone));
     }
 #endif
 
