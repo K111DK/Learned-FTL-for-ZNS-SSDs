@@ -14,26 +14,13 @@
 #define DM_ZFTL_SFTL_L2P_FRAME_LENGTH (1024)
 #define DM_ZFTL_LEAFTL_L2P_FRAME_LENGTH (256)
 #define DM_ZFTL_MAX_L2P_SIZE ((unsigned int)2 * 1024 * 1024 * 1024) // in bytes 2GB
-// dm_map => try_pin_l2p =>  (succeed) (remove from lru) => submit io to queue ... => io fin , unlock map, return it to lru
-//                        => queue l2p io
-//                                    => process => cb: add to lru, then try_pin_again
-//
-// dm_map => try_pin_l2p: try get l2p page from mem pool => (all succeed)
-//                                                       => (queue fail)
-//
-// (all succeed) => (check ok and submit queue io)
-// (fail) => queue l2p io
-//
-//
-//  l2p io => fake => cb ctx_update=> done_l2p_mem_pool * l2p_cache = dm_zftl->l2p_mem_pool;
-//
-//
-//
+
 void dm_zftl_l2p_set_init(struct dm_zftl_target * dm_zftl){
     dm_zftl->l2p_mem_pool = MALLOC(sizeof (struct dm_zftl_l2p_mem_pool));
     struct dm_zftl_l2p_mem_pool * l2p_mem_pool = dm_zftl->l2p_mem_pool;
     int _blocks = dmz_sect2blk(dm_zftl->capacity_nr_sectors);
 
+    mutex_init(&l2p_mem_pool->mutex_lock);
     l2p_mem_pool->lbns_in_frame = DM_ZFTL_SFTL_L2P_FRAME_LENGTH;
     l2p_mem_pool->max_frame = _blocks / l2p_mem_pool->lbns_in_frame;
 
@@ -81,28 +68,21 @@ struct l2p_pin_work * dm_zftl_init_pin_ctx(struct dm_zftl_target * dm_zftl, stru
     pin_work_ctx->dm_zftl = dm_zftl;
     atomic_set(&pin_work_ctx->pinned_cnt, 0);
     atomic_set(&pin_work_ctx->deferred_cnt, 0);
+    pin_work_ctx->deferred_count = 0;
+    pin_work_ctx->pinned_count = 0;
     return pin_work_ctx;
 }
 
 int dm_zftl_try_l2p_pin(struct dm_zftl_target * dm_zftl, struct io_job * io_job){
 
     struct l2p_pin_work * pin_work_ctx = dm_zftl_init_pin_ctx(dm_zftl, io_job);
-
     if(io_job->flags == IO_WORK){
         struct dm_zftl_io_work * io_work = io_job->io_work;
         struct dm_zftl_l2p_mem_pool * l2p_cache = io_work->target->l2p_mem_pool;
         io_work->pin_work_ctx = pin_work_ctx;
         struct bio * bio = io_work->bio_ctx;
 
-        if(bio_op(bio) != REQ_OP_READ && bio_op(bio) != REQ_OP_WRITE){
-            dm_zftl_l2p_pin_complete(pin_work_ctx);
-        }
-
         unsigned int nr_blocks = dmz_bio_blocks(bio);
-        if(nr_blocks == 0){
-            kvfree(pin_work_ctx);
-            return 0;
-        }
 
         unsigned int start_l2p_page = dmz_bio_block(bio) / l2p_cache->lbns_in_frame;
         unsigned int end_l2p_page = (dmz_bio_block(bio) + nr_blocks) / l2p_cache->lbns_in_frame;
@@ -110,17 +90,22 @@ int dm_zftl_try_l2p_pin(struct dm_zftl_target * dm_zftl, struct io_job * io_job)
 
         for(l2p_page_no = start_l2p_page; l2p_page_no <= end_l2p_page; ++l2p_page_no){
             struct dm_zftl_l2p_frame * frame = l2p_cache->l2f_table[l2p_page_no];
+            struct frame_no_node * frame_node = kvmalloc(sizeof(struct frame_no_node), GFP_KERNEL);
+            frame_node->frame_no = frame->frame_no;
+
             unsigned long flags;
             spin_lock_irqsave(&frame->_lock, flags);
             if(frame->state == ON_DRAM){
 
-                TAILQ_INSERT_HEAD(&pin_work_ctx->_pinned_list, frame, list_entry);
+                TAILQ_INSERT_HEAD(&pin_work_ctx->_pinned_list, frame_node, list_entry);
                 atomic_inc(&pin_work_ctx->pinned_cnt);
+                pin_work_ctx->pinned_count++;
 
             }else{
 
-                TAILQ_INSERT_HEAD(&pin_work_ctx->_deferred_pin_list, frame, list_entry);
+                TAILQ_INSERT_HEAD(&pin_work_ctx->_deferred_pin_list, frame_node, list_entry);
                 atomic_inc(&pin_work_ctx->deferred_cnt);
+                pin_work_ctx->deferred_count++;
                 pin_work_ctx->wanted_free_space += l2p_cache->GTD[l2p_page_no];
 
             }
@@ -128,7 +113,6 @@ int dm_zftl_try_l2p_pin(struct dm_zftl_target * dm_zftl, struct io_job * io_job)
             spin_unlock_irqrestore(&frame->_lock, flags);
             pin_work_ctx->total_l2p_page++;
         }
-
     }else if(io_job->flags == CP_JOB){
         struct copy_job * cp_job = io_job->cp_job;
         struct dm_zftl_l2p_mem_pool * l2p_cache = cp_job->dm_zftl->l2p_mem_pool;
@@ -141,18 +125,23 @@ int dm_zftl_try_l2p_pin(struct dm_zftl_target * dm_zftl, struct io_job * io_job)
             curr_frame = cp_job->cp_lpn_array[i] / l2p_cache->lbns_in_frame;
             if(curr_frame != pre_frame){
                 struct dm_zftl_l2p_frame * frame = l2p_cache->l2f_table[curr_frame];
+                struct frame_no_node * frame_node = kvmalloc(sizeof(struct frame_no_node), GFP_KERNEL);
+                frame_node->frame_no = frame->frame_no;
+
                 unsigned long flags;
                 spin_lock_irqsave(&frame->_lock, flags);
                 if(frame->state == ON_DRAM){
 
-                    TAILQ_INSERT_HEAD(&pin_work_ctx->_pinned_list, frame, list_entry);
+                    TAILQ_INSERT_HEAD(&pin_work_ctx->_pinned_list, frame_node, list_entry);
                     atomic_inc(&pin_work_ctx->pinned_cnt);
+                    pin_work_ctx->pinned_count++;
 
                 }else{
 
-                    TAILQ_INSERT_HEAD(&pin_work_ctx->_deferred_pin_list, frame, list_entry);
+                    TAILQ_INSERT_HEAD(&pin_work_ctx->_deferred_pin_list, frame_node, list_entry);
                     atomic_inc(&pin_work_ctx->deferred_cnt);
                     pin_work_ctx->wanted_free_space += l2p_cache->GTD[curr_frame];
+                    pin_work_ctx->deferred_count++;
 
                 }
 
@@ -161,7 +150,6 @@ int dm_zftl_try_l2p_pin(struct dm_zftl_target * dm_zftl, struct io_job * io_job)
             }
             pre_frame = curr_frame;
         }
-
     }else{
 
         return 1;
@@ -176,7 +164,10 @@ int dm_zftl_try_l2p_pin(struct dm_zftl_target * dm_zftl, struct io_job * io_job)
     //dm_zftl_try_evict(dm_zftl, dm_zftl->l2p_mem_pool);
     if(dm_zftl_is_pin_complete(pin_work_ctx)){
         // kick off normal io
-        dm_zftl_l2p_pin_complete(pin_work_ctx);
+        struct l2p_pin_complete_work * work = kvmalloc(sizeof (struct l2p_pin_complete_work), GFP_KERNEL);
+        work->pin_work_ctx = pin_work_ctx;
+        INIT_WORK(&work->work, dm_zftl_l2p_pin_complete);
+        queue_work(pin_work_ctx->dm_zftl->io_kick_off_wq, &work->work);
     }else{
         // queue page in/ page out io
         dm_zftl_queue_l2p_pin_io(pin_work_ctx);
@@ -185,18 +176,11 @@ int dm_zftl_try_l2p_pin(struct dm_zftl_target * dm_zftl, struct io_job * io_job)
 }
 
 void dm_zftl_unpin(struct l2p_pin_work * pin_work_ctx){
-    struct dm_zftl_l2p_frame * frame;
-    struct dm_zftl_l2p_mem_pool * l2p_cache = pin_work_ctx->dm_zftl->l2p_mem_pool;
-#if DM_ZFTL_PIN_DEBUG
-    if(pin_work_ctx->io_job->flags == IO_WORK)
-        printk(KERN_EMERG "[UNPIN] Bio unpin");
-    else
-        printk(KERN_EMERG "[UNPIN] Reclaim Dev:%s Zone:%u", DM_ZFTL_DEV_STR(pin_work_ctx->io_job->cp_job->copy_from),
-                                                            pin_work_ctx->io_job->cp_job->reclaim_zone_id);
 
-#endif
-    TAILQ_FOREACH(frame, &pin_work_ctx->_pinned_list, list_entry){
-        dm_zftl_unpin_frame(l2p_cache, frame);
+    struct dm_zftl_l2p_mem_pool * l2p_cache = pin_work_ctx->dm_zftl->l2p_mem_pool;
+    struct frame_no_node * frame_no;
+    TAILQ_FOREACH(frame_no, &pin_work_ctx->_pinned_list, list_entry){
+        dm_zftl_unpin_frame(l2p_cache, l2p_cache->l2f_table[frame_no->frame_no]);
     }
 }
 
@@ -210,33 +194,20 @@ struct dm_zftl_l2p_frame * dm_zftl_create_new_frame(unsigned int frame_no){
     return frame;
 }
 
-void dm_zftl_pin_frame(struct dm_zftl_l2p_mem_pool *l2p_cache, struct dm_zftl_l2p_frame * frame){
-    atomic_inc(&frame->ref_count);
-    dm_zftl_del_from_lru(l2p_cache, frame);
-    return;
-}
-
-void dm_zftl_unpin_frame(struct dm_zftl_l2p_mem_pool *l2p_cache, struct dm_zftl_l2p_frame * frame){
-    BUG_ON(!frame);
-    //BUG_ON(!l2p_cache->l2f_table[frame->frame_no]);
-    if(atomic_dec_and_test(&frame->ref_count))
-        dm_zftl_add_to_lru(l2p_cache, frame);
-}
-
-int dm_zftl_is_pin_complete(struct l2p_pin_work * pin_ctx){
-    return pin_ctx->total_l2p_page == (atomic_read(&pin_ctx->pinned_cnt));
-}
 
 int dm_zftl_queue_l2p_pin_io(struct l2p_pin_work *pin_work_ctx){
-    struct dm_zftl_l2p_frame * frame;
+    struct frame_no_node * frame_node;
     struct dm_zftl_l2p_mem_pool * l2p_cache = pin_work_ctx->dm_zftl->l2p_mem_pool;
-    TAILQ_FOREACH(frame, &pin_work_ctx->_deferred_pin_list, list_entry){
+    int deferred = 0;
+    TAILQ_FOREACH(frame_node, &pin_work_ctx->_deferred_pin_list, list_entry){
+        deferred++;
         struct l2p_page_in_work * page_in_work = kvmalloc(sizeof(struct l2p_page_in_work), GFP_KERNEL | __GFP_ZERO);
         page_in_work->pin_work =  pin_work_ctx;
-        page_in_work->frame = frame;
+        page_in_work->frame = l2p_cache->l2f_table[frame_node->frame_no];
         INIT_WORK(&page_in_work->work, dm_zftl_do_l2p_pin_io);
         queue_work(pin_work_ctx->dm_zftl->l2p_pin_wq, &page_in_work->work);
     }
+    BUG_ON(deferred != pin_work_ctx->deferred_count);
     return 0;
 }
 
@@ -245,83 +216,90 @@ void dm_zftl_do_l2p_pin_io(struct work_struct * work){
     struct dm_zftl_l2p_mem_pool * l2p_cache = page_in_work->pin_work->dm_zftl->l2p_mem_pool;
     unsigned long flags;
 
-    spin_lock_irqsave(&page_in_work->frame->_lock, flags);
-
-    if(page_in_work->frame->state == IN_PROC){
-        spin_unlock_irqrestore(&page_in_work->frame->_lock, flags);
-
-        // requeue it till READY
-        printk(KERN_EMERG "Waiting other pin io done!");
-        INIT_WORK(&page_in_work->work, dm_zftl_do_l2p_pin_io);
-        queue_work(page_in_work->pin_work->dm_zftl->l2p_pin_wq, &page_in_work->work);
-
-    }else if(page_in_work->frame->state == READY){
-        spin_unlock_irqrestore(&page_in_work->frame->_lock, flags);
-
-        dm_zftl_l2p_pin_io_cb(0, (void *)page_in_work);
-
-    }else if(page_in_work->frame->state == ON_DISK){
-        page_in_work->frame->state = IN_PROC;
-        spin_unlock_irqrestore(&page_in_work->frame->_lock, flags);
-
-        struct dm_io_region *where = kvmalloc(sizeof(struct dm_io_region), GFP_NOIO);
-
-        where->bdev = page_in_work->pin_work->dm_zftl->cache_device->bdev;
-        where->sector = 0;//TODO: Currently we only read first 4k block of cache device to stimulate page in io
-        where->count = dmz_blk2sect(1);
-
-        struct dm_io_request iorq;
-        iorq.bi_op = REQ_OP_READ;
-        iorq.bi_op_flags = 0;
-        iorq.mem.type = DM_IO_VMA;
-        iorq.mem.ptr.vma = page_in_work->pin_work->dm_zftl->dummy_l2p_buffer;
-        iorq.notify.fn = dm_zftl_l2p_pin_io_cb;
-        iorq.notify.context = page_in_work;
-        iorq.client = page_in_work->pin_work->dm_zftl->io_client;
-        dm_io(&iorq, 1, where, NULL);
-
-    }
 
 
+    struct dm_io_region *where = kvmalloc(sizeof(struct dm_io_region), GFP_NOIO);
 
+    where->bdev = page_in_work->pin_work->dm_zftl->cache_device->bdev;
+    where->sector = 0;//TODO: Currently we only read first 4k block of cache device to stimulate page in io
+    where->count = dmz_blk2sect(1);
+
+    struct dm_io_request iorq;
+    iorq.bi_op = REQ_OP_READ;
+    iorq.bi_op_flags = 0;
+    iorq.mem.type = DM_IO_VMA;
+    iorq.mem.ptr.vma = page_in_work->pin_work->dm_zftl->dummy_l2p_buffer;
+    iorq.notify.fn = dm_zftl_l2p_pin_io_cb;
+    iorq.notify.context = page_in_work;
+    iorq.client = page_in_work->pin_work->dm_zftl->io_client;
+    dm_io(&iorq, 1, where, NULL);
 }
 
 void dm_zftl_l2p_pin_io_cb(unsigned long error, void * context){
     struct l2p_page_in_work * page_in_work = (struct l2p_page_in_work *)context;
-
+    int kick_off = 0;
     unsigned long flags;
+
     spin_lock_irqsave(&page_in_work->frame->_lock, flags);
-    page_in_work->frame->state = READY;
+    page_in_work->frame->state = ON_DRAM;
     spin_unlock_irqrestore(&page_in_work->frame->_lock, flags);
 
+    atomic_dec(&page_in_work->pin_work->deferred_cnt);
     atomic_inc(&page_in_work->pin_work->pinned_cnt);
-    if(atomic_dec_and_test(&page_in_work->pin_work->deferred_cnt)){
-        struct dm_zftl_l2p_mem_pool * l2p_cache = page_in_work->pin_work->dm_zftl->l2p_mem_pool;
-        struct dm_zftl_l2p_frame * frame;
-        unsigned long flags;
-        TAILQ_FOREACH(frame, &page_in_work->pin_work->_deferred_pin_list, list_entry){
-            //TODO: add GTD
-            TAILQ_INSERT_HEAD(&page_in_work->pin_work->_pinned_list, frame, list_entry);
-            TAILQ_REMOVE(&page_in_work->pin_work->_deferred_pin_list, frame, list_entry);
+    if(atomic_read(&page_in_work->pin_work->deferred_cnt) == 0){
+        kick_off = 1;
+    }
 
-            spin_lock_irqsave(&l2p_cache->_lock, flags);
-            l2p_cache->current_size += l2p_cache->GTD[frame->frame_no];
-            spin_unlock_irqrestore(&l2p_cache->_lock, flags);
 
-            dm_zftl_pin_frame(l2p_cache, frame);
-        }
-
-        TAILQ_FOREACH(frame, &page_in_work->pin_work->_pinned_list, list_entry){
-            dm_zftl_pin_frame(l2p_cache, frame);
-        }
-
-        dm_zftl_l2p_pin_complete(page_in_work->pin_work);
+    if(kick_off){
+        struct l2p_pin_complete_work * work = kvmalloc(sizeof (struct l2p_pin_complete_work), GFP_KERNEL);
+        work->pin_work_ctx = page_in_work->pin_work;
+        INIT_WORK(&work->work, dm_zftl_l2p_pin_complete);
+        queue_work(page_in_work->pin_work->dm_zftl->io_kick_off_wq, &work->work);
     }
 }
 
-int dm_zftl_l2p_pin_complete(struct l2p_pin_work * pin_work){
+void dm_zftl_l2p_pin_complete(struct work_struct * work){
+    struct l2p_pin_complete_work * complete_work = container_of(work, struct l2p_pin_complete_work, work);
+    struct l2p_pin_work * pin_work =  complete_work->pin_work_ctx;
+    struct dm_zftl_l2p_mem_pool * l2p_cache = pin_work->dm_zftl->l2p_mem_pool;
+
+    struct frame_no_node * frame_node;
+    unsigned long flags;
+//    while(!TAILQ_EMPTY(&pin_work->_deferred_pin_list)){
+//
+//        frame = TAILQ_FIRST(&pin_work->_deferred_pin_list);
+//
+//        TAILQ_REMOVE(&pin_work->_deferred_pin_list, frame, list_entry);
+//        //TAILQ_INSERT_HEAD(&pin_work->_pinned_list, frame, list_entry);
+//    }
+    int deferred = 0;
+    TAILQ_FOREACH(frame_node, &pin_work->_deferred_pin_list, list_entry){
+        deferred++;
+        dm_zftl_pin_frame(l2p_cache, l2p_cache->l2f_table[frame_node->frame_no]);
+        //TAILQ_INSERT_HEAD(&pin_work->_pinned_list, frame, list_entry);
+    }
+    if(deferred != pin_work->deferred_count){
+        printk(KERN_EMERG "Deferred err=> true:%d, wanted:%d", deferred, pin_work->deferred_count);
+        BUG_ON(1);
+    }
+
+    int pin_cnt = 0;
+    TAILQ_FOREACH(frame_node, &pin_work->_pinned_list, list_entry){\
+        pin_cnt++;
+        dm_zftl_pin_frame(l2p_cache, l2p_cache->l2f_table[frame_node->frame_no]);
+    }
+    if(pin_cnt != pin_work->pinned_count){
+        printk(KERN_EMERG "Pin err");
+        BUG_ON(1);
+    }
+
+
+
+
     if(pin_work->io_job->flags == IO_WORK){
         struct dm_zftl_io_work * io_work = pin_work->io_job->io_work;
+
 #if DM_ZFTL_PIN_DEBUG
         printk(KERN_EMERG "[PIN] pin done, kick off bio:[%u, %u]", dmz_bio_block(io_work->bio_ctx),
                 dmz_bio_blocks(io_work->bio_ctx) + dmz_bio_block(io_work->bio_ctx));
@@ -337,7 +315,6 @@ int dm_zftl_l2p_pin_complete(struct l2p_pin_work * pin_work){
         cp_job->pin_cb_ctx = (void *)cp_job;
         cp_job->pin_cb_fn(cp_job->pin_cb_ctx);
     }
-    return 1;
 }
 
 void dm_zftl_del_from_lru(struct dm_zftl_l2p_mem_pool * l2p_cache, struct dm_zftl_l2p_frame * frame){
@@ -377,6 +354,25 @@ void dm_zftl_add_to_lru(struct dm_zftl_l2p_mem_pool * l2p_cache, struct dm_zftl_
         spin_unlock_irqrestore(&l2p_cache->_lock, flags1);
     }
 
+}
+
+
+void dm_zftl_pin_frame(struct dm_zftl_l2p_mem_pool *l2p_cache, struct dm_zftl_l2p_frame * frame){
+    return;
+    atomic_inc(&frame->ref_count);
+    dm_zftl_del_from_lru(l2p_cache, frame);
+    return;
+}
+
+void dm_zftl_unpin_frame(struct dm_zftl_l2p_mem_pool *l2p_cache, struct dm_zftl_l2p_frame * frame){
+    BUG_ON(!frame);
+    //BUG_ON(!l2p_cache->l2f_table[frame->frame_no]);
+    if(atomic_dec_and_test(&frame->ref_count))
+        dm_zftl_add_to_lru(l2p_cache, frame);
+}
+
+int dm_zftl_is_pin_complete(struct l2p_pin_work * pin_ctx){
+    return pin_ctx->total_l2p_page == (atomic_read(&pin_ctx->pinned_cnt));
 }
 
 void dm_zftl_l2p_promote(struct dm_zftl_l2p_mem_pool * l2p_cache, struct dm_zftl_l2p_frame * frame){
@@ -863,7 +859,6 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
     mutex_lock(&dm_zftl->mapping_table->l2p_lock);
     sector_t start_ppa = dm_zftl_get_seq_wp(dev, bio_sectors(bio));
     mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
-
     sector_t desire, addr1, addr2;
     desire = bio->bi_iter.bi_sector;
 
@@ -1110,6 +1105,13 @@ static int dm_zftl_map(struct dm_target *ti, struct bio *bio)
     struct io_job * io_job = kvmalloc(sizeof(struct io_job), GFP_NOIO);
     io_job->flags = IO_WORK;
     io_job->io_work = io_work;
+
+    if(bio_op(bio) != REQ_OP_READ && bio_op(bio) != REQ_OP_WRITE){
+        return DM_MAPIO_SUBMITTED;
+    }
+
+    if(!dmz_bio_blocks(bio))
+        return DM_MAPIO_SUBMITTED;
 
     /* Now ready to handle this BIO */
 #if DM_ZFTL_L2P_PIN
@@ -1411,6 +1413,12 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
         goto err_dev;
     }
 
+    dmz->io_kick_off_wq = alloc_ordered_workqueue("dmz_zftl_io_kick_off", WQ_MEM_RECLAIM, 0);
+    if (!dmz->io_kick_off_wq) {
+        ti->error = "Create kick off io workqueue failed";
+        ret = -ENOMEM;
+        goto err_dev;
+    }
     //dmz->reclaim_work = vmalloc(sizeof(struct dm_zftl_reclaim_read_work));
     //dmz->reclaim_work->target = dmz;
     //INIT_DELAYED_WORK(&dmz->reclaim_work->work, dm_zftl_reclaim_read_work);

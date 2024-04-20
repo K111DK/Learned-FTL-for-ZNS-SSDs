@@ -176,7 +176,6 @@ void dm_zftl_do_reclaim(struct work_struct *work, struct zoned_dev *reclaim_from
 
 
     spin_lock_init(&cp_job->lock_);
-
     mutex_lock(&dm_zftl->mapping_table->l2p_lock);
 
     unsigned int reclaim_zone_id = dm_zftl_get_reclaim_zone(cp_job->copy_from, dm_zftl->mapping_table);

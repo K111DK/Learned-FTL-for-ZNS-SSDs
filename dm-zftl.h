@@ -66,7 +66,7 @@
  * Creates block devices with 4KB blocks, always.
  * copy from dm-zoned
  */
-#define DM_ZFTL_L2P_PIN 0
+#define DM_ZFTL_L2P_PIN 1
 #define DMZ_BLOCK_SHIFT		12
 #define DMZ_BLOCK_SIZE		(1 << DMZ_BLOCK_SHIFT)
 #define DMZ_BLOCK_MASK		(DMZ_BLOCK_SIZE - 1)
@@ -170,6 +170,7 @@ struct dm_zftl_l2p_frame{
 };
 
 struct dm_zftl_l2p_mem_pool{
+    struct mutex mutex_lock;
     struct dm_zftl_l2p_frame ** l2f_table;// l2p page ->  dataframe+
     unsigned int max_frame;
     unsigned int lbns_in_frame;// n of lpn in a l2p frame (4B * 1024)
@@ -243,6 +244,8 @@ struct dm_zftl_target {
     struct workqueue_struct *l2p_pin_wq;
     struct workqueue_struct *l2p_page_out_wq;
     struct dm_zftl_l2p_mem_pool *l2p_mem_pool;
+
+    struct workqueue_struct *io_kick_off_wq;
 
 
     struct dm_zftl_reclaim_read_work *reclaim_work;
@@ -407,6 +410,11 @@ struct io_job{
     struct l2p_pin_work * pin_work;
 };
 
+struct frame_no_node {
+    TAILQ_ENTRY(frame_no_node) list_entry;
+    unsigned int frame_no;
+};
+
 struct l2p_pin_work{
     struct dm_zftl_target * dm_zftl;
     struct work_struct work;
@@ -417,8 +425,10 @@ struct l2p_pin_work{
     unsigned int wanted_free_space;
     atomic_t pinned_cnt;
     atomic_t deferred_cnt;
-    TAILQ_HEAD(_pinned_list, dm_zftl_l2p_frame) _pinned_list;
-    TAILQ_HEAD(_deferred_pin_list, dm_zftl_l2p_frame) _deferred_pin_list;
+    int deferred_count;
+    int pinned_count;
+    TAILQ_HEAD(_pinned_list, frame_no_node) _pinned_list;
+    TAILQ_HEAD(_deferred_pin_list, frame_no_node) _deferred_pin_list;
 };
 enum {
     READY,// this frame is in DRAM
@@ -442,12 +452,15 @@ struct l2p_page_out_work{
     int page_out_cnt;
 };
 
-
+struct l2p_pin_complete_work{
+    struct work_struct work;
+    struct l2p_pin_work * pin_work_ctx;
+};
 void dm_zftl_unpin(struct l2p_pin_work * pin_work_ctx);
 struct dm_zftl_l2p_frame * dm_zftl_create_new_frame(unsigned int frame_no);
 int dm_zftl_is_pin_complete(struct l2p_pin_work * pin_ctx);
 int dm_zftl_try_l2p_pin(struct dm_zftl_target * dm_zftl, struct io_job * io_job);
-int dm_zftl_l2p_pin_complete(struct l2p_pin_work * pin_work);
+void dm_zftl_l2p_pin_complete(struct work_struct * work);
 int dm_zftl_queue_l2p_pin_io(struct l2p_pin_work * pin_work_ctx);
 void dm_zftl_do_l2p_pin_io(struct work_struct *work);
 void dm_zftl_l2p_pin_io_cb(unsigned long error, void * context);
