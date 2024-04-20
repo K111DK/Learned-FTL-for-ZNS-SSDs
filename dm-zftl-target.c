@@ -214,17 +214,49 @@ int dm_zftl_queue_l2p_pin_io(struct l2p_pin_work *pin_work_ctx){
 void dm_zftl_do_l2p_pin_io(struct work_struct * work){
     struct l2p_page_in_work * page_in_work = container_of(work, struct l2p_page_in_work, work);
     struct dm_zftl_l2p_mem_pool * l2p_cache = page_in_work->pin_work->dm_zftl->l2p_mem_pool;
-    unsigned long flags;
-
-
-
     struct dm_io_region *where = kvmalloc(sizeof(struct dm_io_region), GFP_NOIO);
+    struct dm_io_request iorq;
+    unsigned long flags;
+    spin_lock_irqsave(&page_in_work->frame->_lock, flags);
+    if(page_in_work->frame->state == ON_DRAM) {
+
+        spin_unlock_irqrestore(&page_in_work->frame->_lock, flags);
+        goto FINISH;
+
+    } else if(page_in_work->frame->state == IN_PROC){
+
+        spin_unlock_irqrestore(&page_in_work->frame->_lock, flags);
+        goto REQUEUE;
+
+    } else if(page_in_work->frame->state == ON_DISK){//ON_DISK
+
+        page_in_work->frame->state = IN_PROC;
+        spin_unlock_irqrestore(&page_in_work->frame->_lock, flags);
+        goto KICK_OFF_PIN_IO;
+
+    } else{
+
+        spin_unlock_irqrestore(&page_in_work->frame->_lock, flags);
+        BUG_ON(1);
+
+    }
+
+    FINISH:
+    dm_zftl_l2p_pin_io_cb(0, page_in_work);
+    return;
+
+    REQUEUE:
+    INIT_WORK(&page_in_work->work, dm_zftl_do_l2p_pin_io);
+    queue_work(page_in_work->pin_work->dm_zftl->l2p_pin_wq, &page_in_work->work);
+    return;
+
+
+    KICK_OFF_PIN_IO:
 
     where->bdev = page_in_work->pin_work->dm_zftl->cache_device->bdev;
     where->sector = 0;//TODO: Currently we only read first 4k block of cache device to stimulate page in io
     where->count = dmz_blk2sect(1);
 
-    struct dm_io_request iorq;
     iorq.bi_op = REQ_OP_READ;
     iorq.bi_op_flags = 0;
     iorq.mem.type = DM_IO_VMA;
@@ -233,6 +265,7 @@ void dm_zftl_do_l2p_pin_io(struct work_struct * work){
     iorq.notify.context = page_in_work;
     iorq.client = page_in_work->pin_work->dm_zftl->io_client;
     dm_io(&iorq, 1, where, NULL);
+    return;
 }
 
 void dm_zftl_l2p_pin_io_cb(unsigned long error, void * context){
