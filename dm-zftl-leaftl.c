@@ -64,7 +64,7 @@ struct lsm_tree * lsm_tree_init(unsigned int total_blocks){
     for (i = 0; i < total_frame; ++i){
         frame[i].access_count = 0;
         frame[i].frame_no = i;
-        frame[i].nr_level = 0;
+        atomic_set(&frame[i].nr_level, 0);
         frame[i].level = NULL;
 
 #if DM_ZFTL_CONCURRENT_SUPPORT
@@ -263,7 +263,7 @@ int lsm_tree_is_seg_overlap_(struct segment *origin_seg,
 
 int lsm_tree_try_clean_seg(struct frame_valid_bitmap * upper_bm, struct segment * origin_seg){
 
-    if(origin_seg->is_acc_seg) {
+    if(origin_seg->is_seq_seg) {
 
         unsigned int start = seg_start(origin_seg);
         unsigned int end = seg_end(origin_seg);
@@ -341,7 +341,7 @@ int lsm_tree_try_merge_seg_(struct segment *origin_seg,
 
     struct frame_valid_bitmap * insert_bm = get_seg_bm(insert_seg);
 
-    if(insert_seg->is_acc_seg && origin_seg->is_acc_seg) {
+    if(insert_seg->is_seq_seg && origin_seg->is_seq_seg) {
         if(seg_start(insert_seg) > seg_start(origin_seg) && seg_end(insert_seg) < seg_end(origin_seg))
                 goto PUSH_DOWN;
         if(seg_start(insert_seg) <= seg_start(origin_seg) && seg_end(insert_seg) >= seg_end(origin_seg))
@@ -361,7 +361,7 @@ int lsm_tree_try_merge_seg_(struct segment *origin_seg,
 
 
 
-    if(origin_seg->is_acc_seg) {
+    if(origin_seg->is_seq_seg) {
 
         unsigned int start = seg_start(origin_seg);
         unsigned int end = seg_end(origin_seg);
@@ -458,7 +458,7 @@ struct segment * lsm_tree_get_ppn_segment(struct lsm_tree * lsm_tree, unsigned i
 
         if(target_segment){
 
-            if(target_segment->is_acc_seg){
+            if(target_segment->is_seq_seg){
                 return target_segment;
             }else {
                 /* Check if this lpn belong to this approximate segment */
@@ -495,7 +495,7 @@ unsigned int lsm_tree_get_ppn(struct lsm_tree * lsm_tree, unsigned int lpn){
 
         if(target_segment){
 
-            if(target_segment->is_acc_seg){
+            if(target_segment->is_seq_seg){
                 ppn = lsm_tree_cal_ppn_(target_segment, lpn);
 
                 //lsm_tree->look_up_hist[look_up] += 1;
@@ -561,7 +561,7 @@ unsigned int lsm_tree_cal_ppn_(struct segment * seg, unsigned int lpn){
 }
 
 unsigned int lsm_tree_cal_ppn_simple__(struct segment * seg, unsigned int lpn){
-    if(seg->is_acc_seg)
+    if(seg->is_seq_seg)
         return lpn - seg->start_lpn + seg->intercept.numerator / seg->intercept.denominator;
     else
         return lsm_tree_CRB_search_lpn_(seg->CRB, lpn) + seg->intercept.numerator / seg->intercept.denominator;
@@ -595,13 +595,13 @@ void lsm_tree_update_seq(struct lsm_tree * lsm_tree, unsigned int start_lpn, int
             segs->slope.numerator = 1;
             segs->intercept.numerator = start_ppn + pre_lpn - start_lpn - segs->start_lpn;
             segs->intercept.denominator = 1;
-            segs->is_acc_seg = 1;
+            segs->is_seq_seg = 1;
             lsm_tree_insert(segs,
                             lsm_tree);
         }
     }
     segs = MALLOC(sizeof (struct segment));
-    segs->is_acc_seg = 1;
+    segs->is_seq_seg = 1;
     segs->CRB = NULL;
     segs->next = NULL;
     segs->start_lpn = pre_lpn;
@@ -657,8 +657,8 @@ struct segment * gen_segment_simple__(const unsigned int * lpn_array, int start_
 //    is_acc = segment_acc_check(lpn_array, start_idx, len, seg, start_ppn) &&
 //             segment_seq_check(lpn_array, start_idx, len);
     is_acc = segment_seq_check(lpn_array, start_idx, len);
-    seg->is_acc_seg = is_acc;
-    if(!seg->is_acc_seg){
+    seg->is_seq_seg = is_acc;
+    if(!seg->is_seq_seg){
         seg->CRB = gen_CRB(lpn_array, start_idx, len);
     }
     return seg;
@@ -711,7 +711,7 @@ struct frame_valid_bitmap *get_level_bitmap(struct lsm_tree_level * level){
 void set_seg_bitmap(struct segment * seg, struct frame_valid_bitmap *bm){
     int i;
     unsigned int lpn;
-    if(seg->is_acc_seg){
+    if(seg->is_seq_seg){
         unsigned int start_lpn = seg_start(seg);
         unsigned int end_lpn = seg_end(seg);
         for(lpn = start_lpn; lpn <= end_lpn; ++lpn){
@@ -789,6 +789,7 @@ void lsm_tree_clean_empty_level__(struct lsm_tree_frame * frame) {
     struct lsm_tree_level * level = frame->level;
     while(level){
         if(!level->seg){
+            atomic_dec(&frame->nr_level);
             if(level == frame->level){
                 frame->level = level->next_level;
                 FREE(level);
@@ -896,7 +897,7 @@ void lsm_tree_level_compact__(struct lsm_tree_level * level, struct frame_valid_
 
     struct segment * virtual_seg = MALLOC(sizeof(struct segment));
     virtual_seg->next = seg;
-    virtual_seg->is_acc_seg = 1;
+    virtual_seg->is_seq_seg = 1;
     virtual_seg->CRB = NULL;
 
     pre_seg = virtual_seg;
@@ -931,7 +932,7 @@ int lsm_tree_seg_compact__(struct segment * seg, struct frame_valid_bitmap *bm){
     unsigned int lpn, valid=0;
     unsigned valid_cnt=0;
     unsigned invalid_cnt=0;
-    if(seg->is_acc_seg){
+    if(seg->is_seq_seg){
         i = 0;
         while(i <= seg->len){
             lpn = seg->start_lpn + i;
@@ -970,6 +971,7 @@ int lsm_tree_seg_compact__(struct segment * seg, struct frame_valid_bitmap *bm){
 /* Create new level and insert into curr level's next level, And return new level */
 struct lsm_tree_level *lsm_tree_insert_new_level_(struct lsm_tree_frame * frame,
                                                   struct lsm_tree_level * curr_level){
+    atomic_inc(&frame->nr_level);
     struct lsm_tree_level * level = MALLOC(sizeof (struct lsm_tree_level));
     level->next_level = NULL;
     level->seg = NULL;
@@ -1045,7 +1047,7 @@ unsigned int lsm_tree_get_seg_size__(struct segment * seg){
     total_size = sizeof(struct segment);
 
     //lpn size
-    if(!seg->is_acc_seg){
+    if(!seg->is_seq_seg){
         total_size += seg->CRB->buffer_len * sizeof(unsigned int);
     }
 
@@ -1056,49 +1058,11 @@ unsigned int lsm_tree_get_seg_size__(struct segment * seg){
                  + SIZE_SLOPE_BYTES + SIZE_INTERCEPTION_BYTES;
 
     //lpn size
-    if(!seg->is_acc_seg){
+    if(!seg->is_seq_seg){
         total_size += seg->CRB->buffer_len * SIZE_FRAME_LPN_OFFSET_BYTES;
     }
 #endif
     return total_size;
-}
-void lsm_tree_frame_status_check(struct lsm_tree_frame * frame) {
-    int acc_count = 0;
-    int appro_count = 0;
-    int crb_count = 0;
-    int level_count = 0;
-
-    if(!frame)
-        return;
-    struct lsm_tree_level * level = frame->level;
-    if(!level)
-        return;
-    while(level) {
-        level_count += 1;
-        struct segment * segs = level->seg;
-        while(segs) {
-            if(segs->is_acc_seg)
-                acc_count += 1;
-            else {
-                appro_count += 1;
-                crb_count += (int)segs->CRB->buffer_len;
-            }
-            segs = segs->next;
-        }
-        level = level->next_level;
-    }
-    printk(KERN_EMERG"Acc seg:%d \n"
-           "Appro seg:%d \n"
-           "Total seg:%d \n"
-           "CRB lpns:%d \n"
-           "Level:%d \n"
-           ,acc_count
-           ,appro_count
-           ,appro_count+acc_count
-           ,crb_count
-           ,level_count);
-
-
 }
 
 
@@ -1323,12 +1287,10 @@ struct segment * gen_segment_original__(const unsigned int * lpn_array, int star
 
 
 
-    int is_acc;
-    is_acc = segment_acc_check(lpn_array, start_idx, len, seg, start_ppn) &&
-             segment_seq_check(lpn_array, start_idx, len);
+    seg->is_acc_seg = segment_acc_check(lpn_array, start_idx, len, seg, start_ppn);
+    seg->is_seq_seg = segment_seq_check(lpn_array, start_idx, len);
 
-    seg->is_acc_seg = is_acc;
-    if(!seg->is_acc_seg){
+    if(!seg->is_seq_seg){
         seg->CRB = gen_CRB(lpn_array, start_idx, len);
     }
     return seg;
@@ -1528,8 +1490,8 @@ struct segment * gen_segment_original__(const unsigned int * lpn_array, int star
     is_acc = segment_acc_check(lpn_array, start_idx, len, seg, start_ppn) &&
              segment_seq_check(lpn_array, start_idx, len);
 
-    seg->is_acc_seg = is_acc;
-    if(!seg->is_acc_seg){
+    seg->is_seq_seg = is_acc;
+    if(!seg->is_seq_seg){
         seg->CRB = gen_CRB(lpn_array, start_idx, len);
     }
     return seg;
@@ -1578,7 +1540,7 @@ void lsm_tree_print_level(struct lsm_tree_level * level){
     struct segment * seg = level->seg;
     printk(KERN_EMERG "\n<level>");
     while(seg){
-        if(seg->is_acc_seg) {
+        if(seg->is_seq_seg) {
             printk(KERN_EMERG " [%llu %llu ] ", seg_start(seg), seg_end(seg));
         }
         else{
@@ -1614,7 +1576,7 @@ struct frame_valid_bitmap *get_seg_bm(struct segment * seg){
     if(!seg)
         return NULL;
 
-    if(seg->is_acc_seg){
+    if(seg->is_seq_seg){
 
         for(i = seg_start(seg); i <= seg_end(seg); ++i){
             bm->bitmap[(i % DM_ZFTL_FRAME_LENGTH) / 8] &= ((unsigned char )1 << ((i % DM_ZFTL_FRAME_LENGTH) % 8));
@@ -1795,7 +1757,7 @@ void free_seg(struct segment * seg){
     if(!seg)
         return;
 
-    if(seg->is_acc_seg){
+    if(seg->is_seq_seg){
         FREE(seg);
     }else{
 

@@ -3,6 +3,7 @@
 //
 #pragma once
 #include "dm-zftl.h"
+#include <asm/atomic.h>
 #ifndef LEAFTL_DM_ZFTL_LEAFTL_H
 #define LEAFTL_DM_ZFTL_LEAFTL_H
 #define DM_ZFTL_LEA_DEBUG 1
@@ -57,6 +58,7 @@ struct segment {
     frac_fp intercept;
     unsigned int len;//dose not include start_lpn
     int is_acc_seg;
+    int is_seq_seg;
     int valid_tag;
     struct segment * next;
     struct conflict_resolution_buffer * CRB;
@@ -124,7 +126,7 @@ struct lsm_tree_level{
 struct lsm_tree_frame{
     unsigned int frame_no;
     struct lsm_tree_level * level;
-    unsigned int nr_level;
+    atomic_t nr_level;
     unsigned int access_count;
 };
 
@@ -232,7 +234,6 @@ unsigned int lsm_tree_get_seg_size__(struct segment * seg);
 void lsm_tree_print_frame(struct lsm_tree_frame * frame);
 
 void lsm_tree_print_level(struct lsm_tree_level * level);
-void lsm_tree_frame_status_check(struct lsm_tree_frame * frame);
 struct frame_valid_bitmap *get_seg_bm(struct segment * seg);
 void lsm_tree_level_promote__(struct lsm_tree_level * upper_level, struct lsm_tree_level * lower_level);
 void free_seg(struct segment * seg);

@@ -506,6 +506,9 @@ struct dm_zftl_io_work * dm_zftl_get_io_work(struct dm_zftl_target *dm_zftl, str
 int dm_zftl_cmp_(const void *a,const void *b);
 int dm_zftl_get_sorted_vaild_lpn(struct copy_job * cp_job);
 struct l2p_pin_work * dm_zftl_init_pin_ctx(struct dm_zftl_target * dm_zftl, struct io_job * io_job);
+void lsm_tree_frame_status_check(struct lsm_tree * tree, status_type_t type,
+                                 unsigned int status_flags, char *result,
+                                 unsigned int maxlen);
 #define DM_ZFTL_PAGE_SIZE (4096)// in bytes
 
 

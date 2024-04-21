@@ -1078,6 +1078,14 @@ void dm_zftl_queue_io(void * context){
     queue_work(io_work->target->io_wq, &io_work->work);
 }
 
+
+void lsm_tree_frame_status_check(struct lsm_tree * tree, status_type_t type,
+                                 unsigned int status_flags, char *result,
+                                 unsigned int maxlen) {
+
+}
+
+
 /*
  * Process a new BIO.
  */
@@ -1515,11 +1523,52 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
     int sz=0;
     DMEMIT("<Dm-zftl>: status.......\n");
 #if DM_ZFTL_USING_LEA_FTL
-    DMEMIT("Mapping table leaftl size:%u\n", lsm_tree_get_size(dm_zftl->mapping_table->lsm_tree));
+    //lsm_tree_frame_status_check(dm_zftl->mapping_table->lsm_tree, type, status_flags, result, maxlen);
+    int acc_count = 0;
+    int appro_count = 0;
+    int crb_count = 0;
+    unsigned int frame_no = 0;
+    struct lsm_tree * tree = dm_zftl->mapping_table->lsm_tree;
+    DMEMIT("Mapping table leaftl size:%u B\n", lsm_tree_get_size(tree));
+
+    for(frame_no = 0; frame_no < tree->nr_frame ; frame_no++) {
+        struct lsm_tree_frame * frame = &tree->frame[frame_no];
+        if(!frame)
+            continue;
+        struct lsm_tree_level * level = frame->level;
+        if(!level)
+            continue;
+        while(level) {
+            struct segment * segs = level->seg;
+            while(segs) {
+                if(segs->is_acc_seg)
+                    acc_count += 1;
+                else {
+                    appro_count += 1;
+                }
+                if(!segs->is_seq_seg){
+                    crb_count += (int)segs->CRB->buffer_len;
+                }
+                segs = segs->next;
+            }
+            level = level->next_level;
+        }
+    }
+
+    DMEMIT("Accurate segments:%d \n"
+           "Approximate segments:%d \n"
+           "Total segments:%d \n"
+           "CRB lpns:%d \n"
+            ,acc_count
+            ,appro_count
+            ,appro_count + acc_count
+            ,crb_count);
+
+
 #else
 
 #endif
-    DMEMIT("Mapping table dftl/sftl size:%u\n", dm_zftl_sftl_get_size(dm_zftl->mapping_table));
+    DMEMIT("Mapping table dftl/sftl size:%u B\n", dm_zftl_sftl_get_size(dm_zftl->mapping_table));
     struct dm_zftl_l2p_mem_pool * l2p_cache = dm_zftl->l2p_mem_pool;
     unsigned int i = 0;
     unsigned int pinned_frame_cnt = 0;
