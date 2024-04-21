@@ -584,7 +584,7 @@ void lsm_tree_update_seq(struct lsm_tree * lsm_tree, unsigned int start_lpn, int
     struct segment * segs;
     unsigned int pre_frame = start_lpn / DM_ZFTL_FRAME_LENGTH;
     for(i = start_lpn; i < start_lpn + len; ++i){
-        unsigned int curr_frame = (start_lpn + i) / DM_ZFTL_FRAME_LENGTH;
+        unsigned int curr_frame = (i) / DM_ZFTL_FRAME_LENGTH;
         if(curr_frame != pre_frame) {
             segs = MALLOC(sizeof (struct segment));
             segs->CRB = NULL;
@@ -593,22 +593,26 @@ void lsm_tree_update_seq(struct lsm_tree * lsm_tree, unsigned int start_lpn, int
             segs->len = i - pre_lpn - 1;
             segs->slope.denominator = 1;
             segs->slope.numerator = 1;
-            segs->intercept.numerator = start_ppn + pre_lpn - start_lpn - segs->start_lpn;
+            segs->intercept.numerator = start_ppn + (pre_lpn - start_lpn) - segs->start_lpn;
             segs->intercept.denominator = 1;
             segs->is_seq_seg = 1;
+            segs->is_acc_seg = 1;
             lsm_tree_insert(segs,
                             lsm_tree);
+            pre_lpn = i;
+            pre_frame = curr_frame;
         }
     }
     segs = MALLOC(sizeof (struct segment));
     segs->is_seq_seg = 1;
+    segs->is_acc_seg = 1;
     segs->CRB = NULL;
     segs->next = NULL;
     segs->start_lpn = pre_lpn;
     segs->len = i - pre_lpn - 1;
     segs->slope.denominator = 1;
     segs->slope.numerator = 1;
-    segs->intercept.numerator = start_ppn + pre_lpn - start_lpn - segs->start_lpn;
+    segs->intercept.numerator = start_ppn + (pre_lpn - start_lpn) - segs->start_lpn;
     segs->intercept.denominator = 1;
     lsm_tree_insert(segs,
                     lsm_tree);

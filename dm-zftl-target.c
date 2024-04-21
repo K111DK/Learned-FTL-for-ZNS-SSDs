@@ -549,7 +549,6 @@ int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_t
                                         unsigned int * lpn_array,
                                         sector_t ppn,
                                         unsigned int nr_block){
-
     unsigned int i = 0;
 #if DM_ZFTL_MAPPING_DEBUG
     printk(KERN_EMERG "L2P Update: LPN:%llu ==> PPN:%llu [%llu blocks]",
@@ -561,6 +560,8 @@ int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_t
     for(i = 0; i < nr_block; ++i){
         dm_zftl_lpn_set_dev(mapping_table, lpn_array[i], DM_ZFTL_BACKEND);
         dm_zftl_set_by_bn(mapping_table, lpn_array[i], ppn + i);
+        BUG_ON(mapping_table->p2l_table[ppn + i] != lpn_array[i]);
+        BUG_ON(mapping_table->l2p_table[lpn_array[i]] != ppn + i);
     }
 #if DM_ZFTL_USING_LEA_FTL
     lsm_tree_update_by_lpn_array(mapping_table->lsm_tree,
@@ -574,11 +575,15 @@ int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_t
 
 int dm_zftl_update_mapping_cache(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, sector_t nr_blocks){
     mutex_lock(&mapping_table->l2p_lock);
-
+#if DM_ZFTL_USING_LEA_FTL
+    lsm_tree_update_seq(mapping_table->lsm_tree, dmz_sect2blk(lba), nr_blocks, dmz_sect2blk(ppa));
+#endif
     int i;
     for(i = 0; i < nr_blocks; ++i){
         dm_zftl_lpn_set_dev(mapping_table, dmz_sect2blk(lba) + i, DM_ZFTL_CACHE);
         dm_zftl_set(mapping_table, lba + (sector_t)i * dmz_blk2sect(1) , ppa + (sector_t)i * dmz_blk2sect(1));
+        BUG_ON(mapping_table->p2l_table[dmz_sect2blk(ppa) + i] != dmz_sect2blk(lba) + i);
+        BUG_ON(mapping_table->l2p_table[dmz_sect2blk(lba) + i] != dmz_sect2blk(ppa) + i);
     }
 #if DM_ZFTL_MAPPING_DEBUG
     printk(KERN_EMERG "L2P Update: LPN:%llu ==> PPN:%llu [%llu blocks]",
@@ -586,9 +591,7 @@ int dm_zftl_update_mapping_cache(struct dm_zftl_mapping_table * mapping_table, s
            dmz_sect2blk(ppa),
            nr_blocks);
 #endif
-#if DM_ZFTL_USING_LEA_FTL
-    lsm_tree_update_seq(mapping_table->lsm_tree, dmz_sect2blk(lba), nr_blocks, dmz_sect2blk(ppa));
-#endif
+
 
     mutex_unlock(&mapping_table->l2p_lock);
 
@@ -605,19 +608,23 @@ int dm_zftl_update_mapping_cache(struct dm_zftl_mapping_table * mapping_table, s
 }
 
 unsigned int dm_zftl_l2p_get(struct dm_zftl_mapping_table * mapping_table, unsigned int lpn){
-    unsigned int ppn;
+    unsigned int ppn, origin_ppn;
     mutex_lock(&mapping_table->l2p_lock);
 
 
 #if DM_ZFTL_USING_LEA_FTL
-    ppn = lsm_tree_get_ppn(mapping_table->lsm_tree,
+    origin_ppn = lsm_tree_get_ppn(mapping_table->lsm_tree,
                                         lpn);
+    ppn = origin_ppn;
     if(ppn != DM_ZFTL_UNMAPPED_PPA){
         ppn = lsm_tree_predict_correct(mapping_table->p2l_table, lpn, ppn);
     }
     if(ppn != mapping_table->l2p_table[lpn]) {
         printk(KERN_EMERG
-        "[Get] predict err! => got:%llu wanted:%llu", ppn, mapping_table->l2p_table[lpn]);
+        "[Get] lpn:%llu predict err! =>dev:%s cal:%llu got:%llu wanted:%llu", lpn, dm_zftl_lpn_is_in_cache(mapping_table, lpn) ? "Cache":"ZNS", origin_ppn , ppn, mapping_table->l2p_table[lpn]);
+        unsigned int i=0;
+        for(i = origin_ppn - ERROR_BOUND; i <= origin_ppn + ERROR_BOUND; ++i)
+            printk(KERN_EMERG "P2L:(PPN:%llu => LPN:%llu) L2P:(LPN:%llu => PPN:%llu)", i, mapping_table->p2l_table[i], mapping_table->p2l_table[i], mapping_table->l2p_table[mapping_table->p2l_table[i]]);
         BUG_ON(1);
     }
 #else
@@ -667,13 +674,6 @@ unsigned int dm_zftl_get_ppa_zone_id(struct dm_zftl_target * dm_zftl, sector_t p
     struct zoned_dev *dev = dm_zftl_get_ppa_dev(dm_zftl, ppa);
     return ppa / dev->zone_nr_sectors;
 }
-
-
-
-
-
-
-
 
 
 struct zoned_dev * dm_zftl_get_ppa_dev(struct dm_zftl_target * dm_zftl, sector_t ppa){
