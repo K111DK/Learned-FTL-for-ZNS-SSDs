@@ -26,7 +26,9 @@ void dm_zftl_lsm_tree_try_compact(struct dm_zftl_target * dm_zftl){
 void dm_zftl_compact_work(struct work_struct *work){
     struct dm_zftl_compact_work * _work = container_of(work, struct dm_zftl_compact_work, work);
     struct dm_zftl_target * dm_zftl = _work->target;
+    mutex_lock(&dm_zftl->mapping_table->l2p_lock);
     lsm_tree_compact(dm_zftl->mapping_table->lsm_tree);
+    mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
 }
 
 void dm_zftl_zns_try_gc(struct dm_zftl_target * dm_zftl){
@@ -196,11 +198,14 @@ void dm_zftl_do_reclaim(struct work_struct *work, struct zoned_dev *reclaim_from
     io_job->flags = CP_JOB;
 
 #if DM_ZFTL_L2P_PIN
-    dm_zftl_try_l2p_pin(dm_zftl, io_job);
+    struct try_l2p_pin * try_pin = kvmalloc(sizeof(struct try_l2p_pin), GFP_KERNEL);
+    try_pin->dm_zftl = dm_zftl;
+    try_pin->io_job = io_job;
+    INIT_WORK(&try_pin->work, dm_zftl_try_l2p_pin);
+    queue_work(dm_zftl->l2p_try_pin_wq, &try_pin->work);
 #else
     cp_job->pin_cb_fn(cp_job->pin_cb_ctx);
 #endif
-
     return;
 
     ERR_OUT:
@@ -303,7 +308,6 @@ void dm_zftl_valid_data_writeback_cb(unsigned long error, void * context){
     struct copy_job * cp_job = context;
     struct dm_zftl_target * dm_zftl = cp_job->dm_zftl;
     clear_bit_unlock(DMZAP_WR_OUTSTANDING, &dm_zftl->zone_device->write_bitmap);
-    mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
 #if DM_ZFTL_L2P_PIN
     dm_zftl_unpin(cp_job->pin_work_ctx);
 #endif
@@ -354,6 +358,7 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
                                         dm_zftl->buffer->lpn_buffer,
                                         dmz_sect2blk(start_ppa),
                                         job->nr_blocks);
+    mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
 
     //we can do unpin now
 
@@ -403,7 +408,6 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
     dm_zftl->cache_2_zns_reclaim_write_traffic_ += job->nr_blocks;
     dm_zftl->last_compact_traffic_ += job->nr_blocks;
     spin_unlock_irqrestore(&dm_zftl->record_lock_, flags);
-
     dm_zftl_lsm_tree_try_compact(dm_zftl);
 
     return 1;

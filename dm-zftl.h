@@ -61,7 +61,7 @@
 #define DM_ZFTL_MIN_BIOS 8192
 #define BDEVNAME_SIZE 256
 #define DM_ZFTL_COMPACT_ENABLE 1
-#define DM_ZFTL_COMPACT_INTERVAL 1000000 //50 * 4MB = 200MB
+#define DM_ZFTL_COMPACT_INTERVAL 2000000 //50 * 4MB = 200MB
 /*
  * Creates block devices with 4KB blocks, always.
  * copy from dm-zoned
@@ -92,18 +92,21 @@
 #define DM_ZFTL_ZNS_GC_WATERMARK_PERCENTILE 30
 #define DM_ZFTL_FOREGROUND_DEV DM_ZFTL_CACHE
 #define DM_ZFTL_BACKGROUND_DEV DM_ZFTL_BACKEND
-#define DM_ZFTL_USING_LEA_FTL 0
+#define DM_ZFTL_USING_LEA_FTL 1
 
 
 enum {
     DMZAP_WR_OUTSTANDING,
 };
 
-
+enum{
+    DM_ZFTL_P2L_READ_OUTSTANDING,
+};
 
 
 struct dm_zftl_mapping_table{
     struct lsm_tree * lsm_tree;
+    struct dm_zftl_target * dm_zftl;
     unsigned int l2p_table_sz; // in blocks
     uint32_t * l2p_table; // all unmapped lba will be mapped to 0 (which is metadata zoned)
     uint32_t * p2l_table;
@@ -111,6 +114,7 @@ struct dm_zftl_mapping_table{
     uint8_t * validate_bitmap;
     struct mutex l2p_lock;
     struct dm_zftl_l2p_mem_pool * l2p_cache;
+    unsigned long p2l_check_bitmap;
 };
 
 unsigned int dm_zftl_l2p_get(struct dm_zftl_mapping_table * mapping_table, unsigned int lpn);
@@ -243,13 +247,28 @@ struct dm_zftl_target {
 
     struct workqueue_struct *l2p_pin_wq;
     struct workqueue_struct *l2p_page_out_wq;
+    struct workqueue_struct *l2p_try_pin_wq;
+
     struct dm_zftl_l2p_mem_pool *l2p_mem_pool;
 
     struct workqueue_struct *io_kick_off_wq;
+    struct workqueue_struct *get_mapping_wq;
 
 
     struct dm_zftl_reclaim_read_work *reclaim_work;
 };
+struct try_l2p_pin {
+
+    struct work_struct work;
+    struct dm_zftl_target * dm_zftl;
+    struct io_job * io_job;
+
+};
+struct get_mapping_work{
+    struct work_struct work;
+    unsigned int lpn;
+};
+
 
 
 #define dm_zftl_is_cache(dev) dev->flags == DM_ZFTL_CACHE
@@ -435,6 +454,7 @@ enum {
     IN_PROC, // this frame is being loading
     INIT, // this frame no in DRAM, and no other io is loading it
     FLUSHING, //
+    TRY,
     ON_DISK,
     ON_DRAM
 };
@@ -459,7 +479,7 @@ struct l2p_pin_complete_work{
 void dm_zftl_unpin(struct l2p_pin_work * pin_work_ctx);
 struct dm_zftl_l2p_frame * dm_zftl_create_new_frame(unsigned int frame_no);
 int dm_zftl_is_pin_complete(struct l2p_pin_work * pin_ctx);
-int dm_zftl_try_l2p_pin(struct dm_zftl_target * dm_zftl, struct io_job * io_job);
+void dm_zftl_try_l2p_pin(struct work_struct * work);
 void dm_zftl_l2p_pin_complete(struct work_struct * work);
 int dm_zftl_queue_l2p_pin_io(struct l2p_pin_work * pin_work_ctx);
 void dm_zftl_do_l2p_pin_io(struct work_struct *work);
