@@ -234,6 +234,7 @@ struct dm_zftl_target {
     struct workqueue_struct *io_wq;
     struct dm_io_client *io_client; /* Client memory pool*/
     struct copy_buffer *buffer;
+    unsigned int *record_buffer;
 
     struct workqueue_struct *reclaim_read_wq;
     atomic_t nr_reclaim_work;

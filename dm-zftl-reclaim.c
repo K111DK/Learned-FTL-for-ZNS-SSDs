@@ -242,7 +242,7 @@ void * dm_zftl_init_copy_buffer(struct dm_zftl_target * dm_zftl){
 
     dm_zftl->buffer->lpn_buffer = vmalloc(sizeof (unsigned int) * COPY_BUFFER_SIZE);
     if(dm_zftl->buffer->lpn_buffer == NULL){
-        kfree(dm_zftl->buffer->lpn_buffer);
+        vfree(dm_zftl->buffer->lpn_buffer);
         printk(KERN_EMERG "Can't alloc lpn buffer");
         return 1;
     }

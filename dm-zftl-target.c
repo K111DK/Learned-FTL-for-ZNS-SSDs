@@ -2,6 +2,7 @@
 // Created by root on 3/3/24.
 //
 #include "dm-zftl.h"
+#include <linux/sort.h>
 #include <linux/module.h>
 #include <linux/blkdev.h>
 #include <linux/mm.h>
@@ -1392,6 +1393,7 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     //make sure init after mapping table init
     dm_zftl_l2p_set_init(dmz);
     dmz->io_client = dm_io_client_create();
+    dmz->record_buffer = NULL;
 
 
     ret = kfifo_alloc(&dmz->cache_device->write_fifo, sizeof(struct zone_link_entry) * dmz->cache_device->nr_zones, GFP_KERNEL);
@@ -1524,20 +1526,44 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
     DMEMIT("<Dm-zftl>: status.......\n");
 #if DM_ZFTL_USING_LEA_FTL
     //lsm_tree_frame_status_check(dm_zftl->mapping_table->lsm_tree, type, status_flags, result, maxlen);
+    int level_sum = 0;
     int acc_count = 0;
     int appro_count = 0;
     int crb_count = 0;
     unsigned int frame_no = 0;
     struct lsm_tree * tree = dm_zftl->mapping_table->lsm_tree;
+
+    if(!dm_zftl->record_buffer){
+        dm_zftl->record_buffer = vmalloc(sizeof (unsigned int) * tree->nr_frame);
+        if(dm_zftl->record_buffer == NULL){
+            vfree(dm_zftl->record_buffer);
+            printk(KERN_EMERG "Can't alloc record buffer\n");
+            return;
+        }
+    }
+
+
     DMEMIT("Mapping table leaftl size:%u B\n", lsm_tree_get_size(tree));
 
     for(frame_no = 0; frame_no < tree->nr_frame ; frame_no++) {
+
         struct lsm_tree_frame * frame = &tree->frame[frame_no];
+
+        if(dm_zftl->record_buffer) {
+            if(!frame)
+                dm_zftl->record_buffer[frame_no] = 0;
+            else
+                dm_zftl->record_buffer[frame_no] = (unsigned int)(atomic_read(&frame->nr_level));
+        }
+
         if(!frame)
             continue;
         struct lsm_tree_level * level = frame->level;
         if(!level)
             continue;
+
+        level_sum += atomic_read(&frame->nr_level);
+
         while(level) {
             struct segment * segs = level->seg;
             while(segs) {
@@ -1555,14 +1581,37 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
         }
     }
 
-    DMEMIT("Accurate segments:%d \n"
-           "Approximate segments:%d \n"
-           "Total segments:%d \n"
-           "CRB lpns:%d \n"
+    DMEMIT("Accurate segments: %d \n"
+           "Approximate segments: %d \n"
+           "Total segments: %d \n"
+           "CRB lpns: %d \n"
             ,acc_count
             ,appro_count
             ,appro_count + acc_count
             ,crb_count);
+
+    unsigned int avg_level;
+    unsigned int p50_level;
+    unsigned int p99_level;
+    unsigned int max_level;
+    DMEMIT("Avg level: %u / %u \n", level_sum, tree->nr_frame);
+    if(dm_zftl->record_buffer){
+        // ascend
+        sort(dm_zftl->record_buffer,
+             tree->nr_frame,
+             sizeof(unsigned int),
+             dm_zftl_cmp_,
+             NULL);
+        max_level = dm_zftl->record_buffer[ tree->nr_frame - 1 ];
+        p99_level = dm_zftl->record_buffer[ 99 * (tree->nr_frame - 1) / 100 ];
+        p50_level = dm_zftl->record_buffer[ 50 * (tree->nr_frame - 1) / 100 ];
+        DMEMIT("Max level: %u\n"
+               "P99 level: %u\n"
+               "P50 level: %u\n",
+               max_level,
+               p99_level,
+               p50_level);
+    }
 
 
 #else
@@ -1596,10 +1645,10 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
     TAILQ_FOREACH(frame, &l2p_cache->_frame_list, list_entry){
         on_lru_frame_cnt++;
     }
-    DMEMIT("Total l2p frame on dram:%u\n", on_drame_frame_cnt);
-    DMEMIT("Total pinned frame:%u\n", pinned_frame_cnt);
-    DMEMIT("Total unpinned frame:%u\n", unpinned_frame_cnt);
-    DMEMIT("Total on lru frame:%u\n", on_lru_frame_cnt);
+    DMEMIT("Total l2p frame on dram: %u\n", on_drame_frame_cnt);
+    DMEMIT("Total pinned frame: %u\n", pinned_frame_cnt);
+    DMEMIT("Total unpinned frame: %u\n", unpinned_frame_cnt);
+    DMEMIT("Total on lru frame: %u\n", on_lru_frame_cnt);
     return;
 }
 
