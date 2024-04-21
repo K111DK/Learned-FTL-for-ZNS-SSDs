@@ -1525,6 +1525,10 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
     int sz=0;
     DMEMIT("<Dm-zftl>: status.......\n");
 #if DM_ZFTL_USING_LEA_FTL
+    struct dm_zftl_compact_work * _work = kmalloc(sizeof(struct dm_zftl_compact_work), GFP_NOIO);
+    _work->target = dm_zftl;
+    dm_zftl_compact_work((struct work_struct *)_work);
+
     //lsm_tree_frame_status_check(dm_zftl->mapping_table->lsm_tree, type, status_flags, result, maxlen);
     int level_sum = 0;
     int acc_count = 0;

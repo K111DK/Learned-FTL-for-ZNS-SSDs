@@ -2,7 +2,7 @@
 extern "C" {
 #endif
 #include "dm-zftl-leaftl.h"
-#define MAX_PROMOTE_LAYER 20
+#define MAX_PROMOTE_LAYER 10
 #define MAX_COMPACT_LAYER 100
 
 
