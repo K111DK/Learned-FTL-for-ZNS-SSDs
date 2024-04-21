@@ -887,6 +887,7 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
 
     mutex_lock(&dm_zftl->mapping_table->l2p_lock);
     sector_t start_ppa = dm_zftl_get_seq_wp(dev, bio_sectors(bio));
+    dev->zoned_metadata->opened_zoned->wp += dmz_blk2sect(dmz_bio_blocks(bio));
     mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
     sector_t desire, addr1, addr2;
     desire = bio->bi_iter.bi_sector;
@@ -938,10 +939,6 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
     iorq.notify.context = context;
     iorq.client = dm_zftl->io_client;
 
-    unsigned long flags;
-    spin_lock_irqsave(&dev->zoned_metadata->opened_zoned->lock_, flags);
-    dev->zoned_metadata->opened_zoned->wp += dmz_blk2sect(dmz_bio_blocks(bio));
-    spin_unlock_irqrestore(&dev->zoned_metadata->opened_zoned->lock_, flags);
 
     //return dm_io(&iorq, 1, where, NULL);
     dm_io(&iorq, 1, where, NULL);

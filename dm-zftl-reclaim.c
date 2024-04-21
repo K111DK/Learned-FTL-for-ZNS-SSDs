@@ -23,7 +23,7 @@ void dm_zftl_lsm_tree_try_compact(struct dm_zftl_target * dm_zftl){
 
 }
 
-void dm_zftl_compact_work(struct work_struct *work){
+void dm_zftl_compact_work(strusct work_struct *work){
     struct dm_zftl_compact_work * _work = container_of(work, struct dm_zftl_compact_work, work);
     struct dm_zftl_target * dm_zftl = _work->target;
     mutex_lock(&dm_zftl->mapping_table->l2p_lock);

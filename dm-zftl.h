@@ -60,7 +60,7 @@
 #define DM_ZFTL_DEBUG 0
 #define DM_ZFTL_MIN_BIOS 8192
 #define BDEVNAME_SIZE 256
-#define DM_ZFTL_COMPACT_ENABLE 0
+#define DM_ZFTL_COMPACT_ENABLE 1
 #define DM_ZFTL_COMPACT_INTERVAL 2000000 //50 * 4MB = 200MB
 /*
  * Creates block devices with 4KB blocks, always.
