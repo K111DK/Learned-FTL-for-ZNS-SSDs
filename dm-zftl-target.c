@@ -617,7 +617,6 @@ unsigned int dm_zftl_l2p_get(struct dm_zftl_mapping_table * mapping_table, unsig
     unsigned int ppn, origin_ppn;
 #if DM_ZFTL_USING_MIX
     if(dm_zftl_lpn_is_in_cache(mapping_table, lpn)){
-        mutex_unlock(&mapping_table->l2p_lock);
         return mapping_table->l2p_table[lpn];
     }
 #endif
@@ -827,16 +826,13 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
 
 
 #if DM_ZFTL_USING_MIX || DM_ZFTL_USING_LEA_FTL
-
-
-
     if(cal_ppn != DM_ZFTL_UNMAPPED_PPA){
-        if(dm_zftl->mapping_table->p2l_table[cal_ppn] != lpn){
+        if(dm_zftl->mapping_table->p2l_table[cal_ppn] != lpn && !dm_zftl_lpn_is_in_cache(dm_zftl->mapping_table, lpn)){
             do_correct_extra_read = 1;
             ppn = lsm_tree_predict_correct(dm_zftl->mapping_table->p2l_table, lpn, cal_ppn);
         }
     }
-
+#endif
     if(ppn != dm_zftl->mapping_table->l2p_table[lpn]) {
         printk(KERN_EMERG
         "[Get] lpn:%llu predict err! => dev:%s cal:%llu got:%llu wanted:%llu"
@@ -847,7 +843,6 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
                 ,dm_zftl->mapping_table->l2p_table[lpn]);
         BUG_ON(1);
     }
-#endif
     read_io->ppn = ppn;//True ppn
     mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
 
@@ -859,6 +854,7 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
 
     if(do_correct_extra_read){
 
+            BUG_ON(cal_ppn == ppn);
             struct dm_io_request iorq;
             iorq.bi_op = REQ_OP_READ;
             iorq.bi_op_flags = 0;
@@ -871,6 +867,7 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
 
     }else{
 
+            BUG_ON(cal_ppn != ppn);
             struct dm_io_request iorq;
             iorq.bi_op = REQ_OP_READ;
             iorq.bi_op_flags = 0;
