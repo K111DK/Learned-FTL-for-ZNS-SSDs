@@ -41,6 +41,7 @@
 #define KB 2 /* in sectors */
 #define MB 1024 * KB
 #define GB 1024 * MB
+#define DM_ZFTL_ZNS_GC_ENABLE 0
 #define DM_ZFTL_PIN_DEBUG 0
 #define DM_ZFTL_VMA_COPY_TEST 0
 #define DM_ZFTL_RECLAIM_ENABLE 1
@@ -66,7 +67,7 @@
  * Creates block devices with 4KB blocks, always.
  * copy from dm-zoned
  */
-#define DM_ZFTL_L2P_PIN 1
+#define DM_ZFTL_L2P_PIN 0
 #define DMZ_BLOCK_SHIFT		12
 #define DMZ_BLOCK_SIZE		(1 << DMZ_BLOCK_SHIFT)
 #define DMZ_BLOCK_MASK		(DMZ_BLOCK_SIZE - 1)
@@ -93,7 +94,7 @@
 #define DM_ZFTL_FOREGROUND_DEV DM_ZFTL_CACHE
 #define DM_ZFTL_BACKGROUND_DEV DM_ZFTL_BACKEND
 #define DM_ZFTL_USING_LEA_FTL 1
-#define DM_ZFTL_USING_MIX 0
+#define DM_ZFTL_USING_MIX 1
 
 enum {
     DMZAP_WR_OUTSTANDING,
@@ -157,6 +158,8 @@ struct dm_zftl_io_work{
 struct dm_zftl_reclaim_read_work{
     struct work_struct work;
     struct dm_zftl_target * target;
+    void *copy_buffer;
+    unsigned int *copy_lpn_buffer;
 };
 
 struct dm_zftl_compact_work{

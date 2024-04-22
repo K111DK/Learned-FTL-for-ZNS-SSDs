@@ -224,7 +224,7 @@ int dm_zftl_queue_l2p_pin_io(struct l2p_pin_work *pin_work_ctx){
         INIT_WORK(&page_in_work->work, dm_zftl_do_l2p_pin_io);
         queue_work(pin_work_ctx->dm_zftl->l2p_pin_wq, &page_in_work->work);
     }
-    //BUG_ON(deferred != pin_work_ctx->deferred_count);
+    BUG_ON(deferred != pin_work_ctx->deferred_count);
     return 0;
 }
 

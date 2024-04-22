@@ -43,6 +43,8 @@ void dm_zftl_zns_try_gc(struct dm_zftl_target * dm_zftl){
 }
 
 int dm_zftl_need_gc(struct dm_zftl_target * dm_zftl){
+    if(!DM_ZFTL_ZNS_GC_ENABLE)
+        return 0;
     if(atomic_read(&dm_zftl->nr_reclaim_work) >= atomic_read(&dm_zftl->max_reclaim_read_work))
         return 0;
     if(atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_full_zone) >= atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_free_zone)){
