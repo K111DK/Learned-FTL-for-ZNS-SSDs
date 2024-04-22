@@ -224,7 +224,7 @@ int dm_zftl_queue_l2p_pin_io(struct l2p_pin_work *pin_work_ctx){
         INIT_WORK(&page_in_work->work, dm_zftl_do_l2p_pin_io);
         queue_work(pin_work_ctx->dm_zftl->l2p_pin_wq, &page_in_work->work);
     }
-    BUG_ON(deferred != pin_work_ctx->deferred_count);
+    //BUG_ON(deferred != pin_work_ctx->deferred_count);
     return 0;
 }
 
@@ -575,9 +575,15 @@ int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_t
 
 int dm_zftl_update_mapping_cache(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, sector_t nr_blocks){
     mutex_lock(&mapping_table->l2p_lock);
+
 #if DM_ZFTL_USING_LEA_FTL
+
+#if !DM_ZFTL_USING_MIX
     lsm_tree_update_seq(mapping_table->lsm_tree, dmz_sect2blk(lba), nr_blocks, dmz_sect2blk(ppa));
 #endif
+
+#endif
+
     int i;
     for(i = 0; i < nr_blocks; ++i){
         dm_zftl_lpn_set_dev(mapping_table, dmz_sect2blk(lba) + i, DM_ZFTL_CACHE);
@@ -611,8 +617,15 @@ unsigned int dm_zftl_l2p_get(struct dm_zftl_mapping_table * mapping_table, unsig
     unsigned int ppn, origin_ppn;
     mutex_lock(&mapping_table->l2p_lock);
 
+#if DM_ZFTL_USING_MIX
+    if(dm_zftl_lpn_is_in_cache(mapping_table, lpn)){
+        mutex_unlock(&mapping_table->l2p_lock);
+        return mapping_table->l2p_table[lpn];
+    }
+#endif
 
 #if DM_ZFTL_USING_LEA_FTL
+
     origin_ppn = lsm_tree_get_ppn(mapping_table->lsm_tree,
                                         lpn);
     ppn = origin_ppn;
@@ -621,10 +634,12 @@ unsigned int dm_zftl_l2p_get(struct dm_zftl_mapping_table * mapping_table, unsig
     }
     if(ppn != mapping_table->l2p_table[lpn]) {
         printk(KERN_EMERG
-        "[Get] lpn:%llu predict err! =>dev:%s cal:%llu got:%llu wanted:%llu", lpn, dm_zftl_lpn_is_in_cache(mapping_table, lpn) ? "Cache":"ZNS", origin_ppn , ppn, mapping_table->l2p_table[lpn]);
-        unsigned int i=0;
-        for(i = origin_ppn - ERROR_BOUND; i <= origin_ppn + ERROR_BOUND; ++i)
-            printk(KERN_EMERG "P2L:(PPN:%llu => LPN:%llu) L2P:(LPN:%llu => PPN:%llu)", i, mapping_table->p2l_table[i], mapping_table->p2l_table[i], mapping_table->l2p_table[mapping_table->p2l_table[i]]);
+        "[Get] lpn:%llu predict err! => dev:%s cal:%llu got:%llu wanted:%llu"
+            ,lpn
+            ,dm_zftl_lpn_is_in_cache(mapping_table, lpn) ? "Cache":"ZNS"
+            ,origin_ppn
+            ,ppn
+            ,mapping_table->l2p_table[lpn]);
         BUG_ON(1);
     }
 #else
@@ -887,11 +902,6 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
 
     mutex_lock(&dm_zftl->mapping_table->l2p_lock);
     sector_t start_ppa = dm_zftl_get_seq_wp(dev, bio_sectors(bio));
-    dev->zoned_metadata->opened_zoned->wp += dmz_blk2sect(dmz_bio_blocks(bio));
-    mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
-    sector_t desire, addr1, addr2;
-    desire = bio->bi_iter.bi_sector;
-
 
     if(start_ppa == DM_ZFTL_UNMAPPED_PPA){
         ret = -EIO;
@@ -899,8 +909,18 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
                     ,atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_free_zone)
                     ,atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_free_zone)
                     ,atomic_read(&dm_zftl->nr_reclaim_work));
+        mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
         goto FINISH;
     }
+
+    dev->zoned_metadata->opened_zoned->wp += dmz_blk2sect(dmz_bio_blocks(bio));
+    mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
+
+    sector_t desire, addr1, addr2;
+    desire = bio->bi_iter.bi_sector;
+
+
+
 
     ppa = start_ppa;
     where->sector = dm_zftl_get_dev_addr(dm_zftl, ppa);
@@ -942,17 +962,14 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
 
     //return dm_io(&iorq, 1, where, NULL);
     dm_io(&iorq, 1, where, NULL);
-    ret = DM_MAPIO_SUBMITTED;
-
-
-
-
+    ret = 0;
     return ret;
 
     FINISH:
-    ret = DM_MAPIO_SUBMITTED;
+    ret = 1;
     dm_zftl_io_complete(bio);
     return ret;
+
 }
 
 /*
@@ -975,8 +992,6 @@ void dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
      */
     //TODO:Write traffic Record
     if (bio_op(bio) == REQ_OP_WRITE){
-        dm_zftl->total_write_traffic_sec_ += bio_sectors(bio);
-        dm_zftl->last_write_traffic_ += bio_sectors(bio);
         dm_zftl_cache_try_reclaim(dm_zftl);
     }
 
@@ -1015,6 +1030,8 @@ void dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
             break;
         case REQ_OP_WRITE:
             ret = dm_zftl_dm_io_write(dm_zftl, bio);
+            if(ret)
+                goto REQUEUE_WRITE;
 #if DM_ZFTL_L2P_PIN
             dm_zftl_unpin(io->pin_work_ctx);
 #endif
@@ -1045,14 +1062,24 @@ void dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
     }
     spin_unlock_irqrestore(&dm_zftl->record_lock_, flags);
 
+    if (bio_op(bio) == REQ_OP_WRITE){
+        dm_zftl->total_write_traffic_sec_ += bio_sectors(bio);
+        dm_zftl->last_write_traffic_ += bio_sectors(bio);
+    }
+    return;
 
+    REQUEUE_WRITE:
+    printk(KERN_EMERG "REQUEUE write");
+    INIT_WORK(&io->work, dm_zftl_io_work_);
+    queue_work(io->target->io_wq, &io->work);
+    return;
 }
 /*
  *
  * IO work fn
  *
  * */
-static void dm_zftl_io_work_(struct work_struct *work){
+void dm_zftl_io_work_(struct work_struct *work){
     struct dm_zftl_io_work * io_work = container_of(work, struct dm_zftl_io_work, work);
     struct bio * io = io_work->bio_ctx;
     dm_zftl_handle_bio(io_work->target, io_work, io);

@@ -1,9 +1,9 @@
 [TEST]
 ioengine=libaio
-bsrange=4k-64k
+bs=64k
 direct=1
 iodepth=32
-size=30G
+size=200G
 numjobs=1
 rw=randwrite
 random_distribution=zipf:1.2

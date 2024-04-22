@@ -45,7 +45,7 @@
 #define DM_ZFTL_VMA_COPY_TEST 0
 #define DM_ZFTL_RECLAIM_ENABLE 1
 #define DM_ZFTL_RECLAIM_THRESHOLD 10
-#define DM_ZFTL_RECLAIM_INTERVAL 200 * MB
+#define DM_ZFTL_RECLAIM_INTERVAL 1 * GB
 #define DM_ZFTL_RECLAIM_DEBUG 0
 #define DM_ZFTL_RECLAIM_MAX_READ_NUM_DEFAULT 1
 
@@ -93,7 +93,7 @@
 #define DM_ZFTL_FOREGROUND_DEV DM_ZFTL_CACHE
 #define DM_ZFTL_BACKGROUND_DEV DM_ZFTL_BACKEND
 #define DM_ZFTL_USING_LEA_FTL 1
-#define DM_ZFTL_USING_MIX 1
+#define DM_ZFTL_USING_MIX 0
 
 enum {
     DMZAP_WR_OUTSTANDING,
@@ -510,6 +510,7 @@ struct l2p_pin_work * dm_zftl_init_pin_ctx(struct dm_zftl_target * dm_zftl, stru
 void lsm_tree_frame_status_check(struct lsm_tree * tree, status_type_t type,
                                  unsigned int status_flags, char *result,
                                  unsigned int maxlen);
+void dm_zftl_io_work_(struct work_struct *work);
 #define DM_ZFTL_PAGE_SIZE (4096)// in bytes
 
 

@@ -23,7 +23,7 @@ void dm_zftl_lsm_tree_try_compact(struct dm_zftl_target * dm_zftl){
 
 }
 
-void dm_zftl_compact_work(strusct work_struct *work){
+void dm_zftl_compact_work(struct work_struct *work){
     struct dm_zftl_compact_work * _work = container_of(work, struct dm_zftl_compact_work, work);
     struct dm_zftl_target * dm_zftl = _work->target;
     mutex_lock(&dm_zftl->mapping_table->l2p_lock);
@@ -45,8 +45,7 @@ void dm_zftl_zns_try_gc(struct dm_zftl_target * dm_zftl){
 int dm_zftl_need_gc(struct dm_zftl_target * dm_zftl){
     if(atomic_read(&dm_zftl->nr_reclaim_work) >= atomic_read(&dm_zftl->max_reclaim_read_work))
         return 0;
-    if(atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_full_zone) * DM_ZFTL_ZNS_GC_WATERMARK_PERCENTILE >=
-            atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_free_zone) * (100 - DM_ZFTL_ZNS_GC_WATERMARK_PERCENTILE)){
+    if(atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_full_zone) >= atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_free_zone)){
         return 1;
     }
     return 0;
@@ -73,7 +72,7 @@ int dm_zftl_need_reclaim(struct dm_zftl_target * dm_zftl){
         return 0;
     if(     (
                 dm_zftl->last_write_traffic_ >= DM_ZFTL_RECLAIM_INTERVAL ||
-                atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_free_zone) <= 5
+                atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_free_zone) <= DM_ZFTL_RECLAIM_THRESHOLD
             )
             && DM_ZFTL_RECLAIM_ENABLE){
         dm_zftl->last_write_traffic_ = 0;
@@ -85,6 +84,7 @@ int dm_zftl_need_reclaim(struct dm_zftl_target * dm_zftl){
 void dm_zftl_do_background_reclaim(struct work_struct *work){
     struct dm_zftl_reclaim_read_work * read_work = container_of(work, struct dm_zftl_reclaim_read_work, work);
     struct dm_zftl_target * dm_zftl = read_work->target;
+    printk(KERN_EMERG "Do zns gc!");
     dm_zftl_do_reclaim(work, dm_zftl->zone_device, dm_zftl->zone_device);
 }
 
@@ -404,6 +404,7 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
 
 
     atomic_dec(&dm_zftl->nr_reclaim_work);
+    dm_zftl_zns_try_gc(dm_zftl);
 
     spin_lock_irqsave(&dm_zftl->record_lock_, flags);
     dm_zftl->cache_2_zns_reclaim_write_traffic_ += job->nr_blocks;
@@ -483,7 +484,8 @@ unsigned int dm_zftl_get_victim_greedy(struct zoned_dev * dev, struct dm_zftl_ma
     if(atomic_read(&dev->zoned_metadata->nr_full_zone) == 0)
         return 0;
 
-    struct zone_link_entry *zone_link = NULL;
+    struct zone_link_entry * zone_link = NULL;
+    struct zone_link_entry * selected_zone_link = NULL;
 
     int found = 0;
     int victim_id = 0;
@@ -493,6 +495,7 @@ unsigned int dm_zftl_get_victim_greedy(struct zoned_dev * dev, struct dm_zftl_ma
             found = 1;
             unsigned int valid_cnt = dm_zftl_zone_vaild_count(dev, zone_link->id, mapping_table);
             if(valid_cnt < min_victim_valid){
+                selected_zone_link = zone_link;
                 victim_id = zone_link->id;
                 min_victim_valid = valid_cnt;
             }
@@ -500,7 +503,7 @@ unsigned int dm_zftl_get_victim_greedy(struct zoned_dev * dev, struct dm_zftl_ma
     }
 
     if(found){
-        list_del(&zone_link->link);
+        list_del(&selected_zone_link->link);
         atomic_dec(&dev->zoned_metadata->nr_full_zone);
     }
 
