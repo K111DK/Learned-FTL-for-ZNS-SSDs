@@ -615,8 +615,6 @@ int dm_zftl_update_mapping_cache(struct dm_zftl_mapping_table * mapping_table, s
 
 unsigned int dm_zftl_l2p_get(struct dm_zftl_mapping_table * mapping_table, unsigned int lpn){
     unsigned int ppn, origin_ppn;
-    mutex_lock(&mapping_table->l2p_lock);
-
 #if DM_ZFTL_USING_MIX
     if(dm_zftl_lpn_is_in_cache(mapping_table, lpn)){
         mutex_unlock(&mapping_table->l2p_lock);
@@ -625,28 +623,11 @@ unsigned int dm_zftl_l2p_get(struct dm_zftl_mapping_table * mapping_table, unsig
 #endif
 
 #if DM_ZFTL_USING_LEA_FTL
-
-    origin_ppn = lsm_tree_get_ppn(mapping_table->lsm_tree,
+    ppn = lsm_tree_get_ppn(mapping_table->lsm_tree,
                                         lpn);
-    ppn = origin_ppn;
-    if(ppn != DM_ZFTL_UNMAPPED_PPA){
-        ppn = lsm_tree_predict_correct(mapping_table->p2l_table, lpn, ppn);
-    }
-    if(ppn != mapping_table->l2p_table[lpn]) {
-        printk(KERN_EMERG
-        "[Get] lpn:%llu predict err! => dev:%s cal:%llu got:%llu wanted:%llu"
-            ,lpn
-            ,dm_zftl_lpn_is_in_cache(mapping_table, lpn) ? "Cache":"ZNS"
-            ,origin_ppn
-            ,ppn
-            ,mapping_table->l2p_table[lpn]);
-        BUG_ON(1);
-    }
 #else
     ppn = mapping_table->l2p_table[lpn];
 #endif
-
-    mutex_unlock(&mapping_table->l2p_lock);
     return ppn;
 
 }
@@ -800,24 +781,12 @@ static inline void dm_zftl_init_bioctx(struct dm_zftl_target *dm_zftl,
 }
 
 void dm_zftl_dm_io_read_cb(unsigned long error, void * context){
-    struct bio * bio =(struct bio *) context;
-    bio_endio(bio);
+    struct dm_zftl_read_io * read_io = (struct dm_zftl_read_io *)context;
+    struct bio * bio = read_io->bio;
+    struct dm_zftl_target * dm_zftl = read_io->dm_zftl;
+    dm_zftl_io_complete(bio);
+    dm_zftl_bio_endio(bio, errno_to_blk_status(0));
 }
-
-#if DM_ZFTL_READ_SPLIT
-void dm_zftl_read_split_cb(unsigned long error, void * context){
-    struct dm_zftl_read_io * read_io = (struct dm_zftl_read_io * )context;
-    unsigned long flags;
-    spin_lock_irqsave(&read_io->lock_, flags);
-
-    read_io->complete_io += 1;
-    if(read_io->complete_io == read_io->nr_io){
-        bio_endio(read_io->bio);
-    }
-
-    spin_unlock_irqrestore(&read_io->lock_, flags);
-}
-#endif
 
 
 int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
@@ -826,58 +795,117 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
 
     unsigned long flags;
     unsigned int nr_blocks = dmz_bio_blocks(bio);
-    struct dm_io_region * where = kvmalloc_array(nr_blocks,
-                                              sizeof(struct dm_io_region), GFP_KERNEL | __GFP_ZERO);
+    struct dm_io_region * where = kvmalloc(sizeof(struct dm_io_region), GFP_KERNEL | __GFP_ZERO);
+
+    if(nr_blocks > 1){
+        printk(KERN_EMERG "Error got read bio > 1 blk");
+        BUG_ON(1);
+    }
+
     int i, ret;
+    unsigned int do_correct_extra_read = 0;
     sector_t start_sec = bio->bi_iter.bi_sector;
     sector_t ppa;
-    sector_t original_ppa = dm_zftl_get(dm_zftl->mapping_table, start_sec);
+    unsigned int cal_ppn;
+    unsigned int lpn = dmz_sect2blk(start_sec);
+    unsigned int ppn;
 
     struct dm_zftl_read_io * read_io = (struct dm_zftl_read_io *)vmalloc(sizeof( struct dm_zftl_read_io));
     read_io->bio = bio;
-    read_io->nr_io = nr_blocks;
+    read_io->nr_io = 1;
     read_io->complete_io = 0;
+    read_io->dm_zftl = dm_zftl;
+    read_io->lpn = lpn;
+
+
     spin_lock_init(&read_io->lock_);
 
+    mutex_lock(&dm_zftl->mapping_table->l2p_lock);
+    ppa = dm_zftl_get(dm_zftl->mapping_table, start_sec);
+    cal_ppn = dmz_sect2blk(ppa);
+    ppn = cal_ppn;
 
-    for(i = 0; i < nr_blocks; ++i){
+
+#if DM_ZFTL_USING_MIX || DM_ZFTL_USING_LEA_FTL
 
 
-        ppa = dm_zftl_get(dm_zftl->mapping_table, start_sec + dmz_blk2sect(i));
-        dev = dm_zftl_get_ppa_dev(dm_zftl, ppa);
-        where[i].bdev = dev->bdev;
-        where[i].sector = dm_zftl_get_dev_addr(dm_zftl, ppa);
-        where[i].count = dmz_blk2sect(1);
 
-#if DM_ZFTL_DEBUG
-        printk(KERN_EMERG "Bio:READ [%llu, %llu](sec) ==> [Sub READ{%llu/%llu}] Dev:%s Zone ID:%llu Range[%llu, %llu](sec)",
-           start_sec + dmz_blk2sect(i),
-           start_sec + dmz_blk2sect(i) + where[i].count,
-           i + 1,
-           nr_blocks,
-           dm_zftl_is_cache(dev) ? "CACHE":"ZNS",
-           dev->zoned_metadata->opened_zoned->id,
-           dm_zftl_get_ppa_dev(dm_zftl, ppa),
-           dm_zftl_get_ppa_dev(dm_zftl, ppa) + where[i].count
-           );
-#endif
-
-        struct dm_io_request iorq;
-        iorq.bi_op = REQ_OP_READ;
-        iorq.bi_op_flags = 0;
-        iorq.mem.type = DM_IO_BIO;
-        iorq.mem.ptr.bio = bio;
-        //iorq.notify.fn = dm_zftl_read_split_cb;
-        iorq.notify.fn = NULL;
-        iorq.notify.context = read_io;
-        iorq.client = dm_zftl->io_client;
-
-        dm_io(&iorq, 1, &where[i], NULL);
-        bio_advance(bio, 1 << DMZ_BLOCK_SHIFT);
+    if(cal_ppn != DM_ZFTL_UNMAPPED_PPA){
+        if(dm_zftl->mapping_table->p2l_table[cal_ppn] != lpn){
+            do_correct_extra_read = 1;
+            ppn = lsm_tree_predict_correct(dm_zftl->mapping_table->p2l_table, lpn, cal_ppn);
+        }
     }
-    dm_zftl_io_complete(bio);
-    dm_zftl_bio_endio(bio, errno_to_blk_status(0));
+
+    if(ppn != dm_zftl->mapping_table->l2p_table[lpn]) {
+        printk(KERN_EMERG
+        "[Get] lpn:%llu predict err! => dev:%s cal:%llu got:%llu wanted:%llu"
+                ,lpn
+                ,dm_zftl_lpn_is_in_cache(dm_zftl->mapping_table, lpn) ? "Cache":"ZNS"
+                ,cal_ppn
+                ,ppn
+                ,dm_zftl->mapping_table->l2p_table[lpn]);
+        BUG_ON(1);
+    }
+#endif
+    read_io->ppn = ppn;//True ppn
+    mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
+
+
+    dev = dm_zftl_get_ppa_dev(dm_zftl, dmz_blk2sect(cal_ppn));
+    where->bdev = dev->bdev;
+    where->sector = dm_zftl_get_dev_addr(dm_zftl, dmz_blk2sect(cal_ppn));
+    where->count = dmz_blk2sect(1);
+
+    if(do_correct_extra_read){
+
+            struct dm_io_request iorq;
+            iorq.bi_op = REQ_OP_READ;
+            iorq.bi_op_flags = 0;
+            iorq.mem.type = DM_IO_VMA;//read oob data to correct
+            iorq.mem.ptr.vma = dm_zftl->dummy_l2p_buffer;
+            iorq.notify.fn = dm_zftl_correct_predict_ppn;
+            iorq.notify.context = read_io;
+            iorq.client = dm_zftl->io_client;
+            dm_io(&iorq, 1, where, NULL);
+
+    }else{
+
+            struct dm_io_request iorq;
+            iorq.bi_op = REQ_OP_READ;
+            iorq.bi_op_flags = 0;
+            iorq.mem.type = DM_IO_BIO;
+            iorq.mem.ptr.bio = bio;
+            iorq.notify.fn = dm_zftl_dm_io_read_cb;
+            iorq.notify.context = read_io;
+            iorq.client = dm_zftl->io_client;
+            dm_io(&iorq, 1, where, NULL);
+
+    }
+
     return DM_MAPIO_SUBMITTED;
+}
+void dm_zftl_correct_predict_ppn(unsigned long error, void * context){
+    struct dm_zftl_read_io * read_io =(struct dm_zftl_read_io *) context;
+    struct bio * bio = read_io->bio;
+    struct dm_zftl_target * dm_zftl = read_io->dm_zftl;
+
+    struct dm_io_region * where = kvmalloc(sizeof(struct dm_io_region), GFP_KERNEL | __GFP_ZERO);
+
+    struct zoned_dev * dev = dm_zftl_get_ppa_dev(dm_zftl, dmz_blk2sect(read_io->ppn));
+    where->bdev = dev->bdev;
+    where->sector = dm_zftl_get_dev_addr(dm_zftl, dmz_blk2sect(read_io->ppn));
+    where->count = dmz_blk2sect(1);
+
+    struct dm_io_request iorq;
+    iorq.bi_op = REQ_OP_READ;
+    iorq.bi_op_flags = 0;
+    iorq.mem.type = DM_IO_BIO;
+    iorq.mem.ptr.bio = read_io->bio;
+    iorq.notify.fn = dm_zftl_dm_io_read_cb;
+    iorq.notify.context = read_io;
+    iorq.client = dm_zftl->io_client;
+    dm_io(&iorq, 1, where, NULL);
 }
 
 void dm_zftl_dm_io_write_cb(unsigned long error, void * context){
@@ -1120,6 +1148,7 @@ static int dm_zftl_map(struct dm_target *ti, struct bio *bio)
     struct zoned_dev *dev = dm_zftl->zone_device;
     sector_t sector = bio->bi_iter.bi_sector;
     unsigned int nr_sectors = bio_sectors(bio);
+    unsigned int nr_blocks = dmz_bio_blocks(bio);
     sector_t zone_sector;
     int ret;
 
@@ -1137,6 +1166,16 @@ static int dm_zftl_map(struct dm_target *ti, struct bio *bio)
     if ((nr_sectors & DMZ_BLOCK_SECTORS_MASK) || (sector & DMZ_BLOCK_SECTORS_MASK)){
         printk(KERN_EMERG "Unaligned bio [%llu, %llu]",sector , sector + nr_sectors);
         return DM_MAPIO_KILL;
+    }
+
+    /* Split read io to 1 block [IMPORTANT] */
+    if( nr_blocks > 1 && bio_op(bio) == REQ_OP_READ ){
+        dm_accept_partial_bio(bio, dmz_blk2sect(1));
+    }
+
+    if(dmz_bio_blocks(bio) > 1 && bio_op(bio) == REQ_OP_READ){
+        printk(KERN_EMERG "[MAP]:Error got read bio > 1 blk");
+        BUG_ON(1);
     }
 
 

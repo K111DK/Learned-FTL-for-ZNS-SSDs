@@ -126,15 +126,18 @@ void dm_zftl_lpn_set_dev(struct dm_zftl_mapping_table * mapping_table, unsigned 
 //sector_t dm_zftl_get(struct dm_zftl_mapping_table * mapping_table, sector_t lba);
 //int dm_zftl_set(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa);
 //int dm_zftl_update_mapping(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, unsigned int nr_blocks);
-#if DM_ZFTL_READ_SPLIT
+void dm_zftl_correct_predict_ppn(unsigned long error, void * context);
 struct dm_zftl_read_io {
+    struct dm_zftl_target * dm_zftl;
     struct bio * bio;
     unsigned int nr_io;
     unsigned int complete_io;
     unsigned int flag;
+    unsigned int ppn;
+    unsigned int lpn;
+    unsigned int read_dev_addr;
     spinlock_t lock_;
 };
-#endif
 
 enum {
     DM_ZFTL_IO_COMPLETE,
