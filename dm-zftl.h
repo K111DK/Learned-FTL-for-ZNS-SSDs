@@ -37,7 +37,7 @@
 #include <linux/jhash.h>
 #include <linux/kfifo.h>
 #include <linux/kernel.h>
-
+#include <linux/gcd.h>
 #define KB 2 /* in sectors */
 #define MB 1024 * KB
 #define GB 1024 * MB
@@ -200,30 +200,30 @@ struct dm_zftl_target {
     void * dummy_l2p_buffer;
 
     spinlock_t record_lock_;
-    unsigned int cache_2_zns_reclaim_write_traffic_;
-    unsigned int cache_2_zns_reclaim_read_traffic_;
+    unsigned long long cache_2_zns_reclaim_write_traffic_;
+    unsigned long long cache_2_zns_reclaim_read_traffic_;
 
     // cache/zns(include gc) wriite traffic (4KB)
-    unsigned int zns_write_traffic_; // in 4K blocks = foregound reclaim + gc write io
-    unsigned int cache_write_traffic_; // in 4K blocks = foregound write io
+    unsigned long long zns_write_traffic_; // in 4K blocks = foregound reclaim + gc write io
+    unsigned long long cache_write_traffic_; // in 4K blocks = foregound write io
 
     // foreground R io traffic (4KB)
-    unsigned int foreground_read_traffic_;
+    unsigned long long foreground_read_traffic_;
     // foreground W io traffic (4KB)
-    unsigned int foreground_write_traffic_;
+    unsigned long long foreground_write_traffic_;
 
 
-    unsigned int foreground_reclaim_cnt_;
-    unsigned int background_reclaim_cnt_;
+    unsigned long long foreground_reclaim_cnt_;
+    unsigned long long background_reclaim_cnt_;
 
     //unused
-    unsigned int total_write_traffic_sec_;
+    unsigned long long total_write_traffic_sec_;
 
     // traffic since last gc
-    unsigned int last_write_traffic_;
+    unsigned long long last_write_traffic_;
 
     // lsm tree traffic since last compact
-    unsigned int last_compact_traffic_;
+    unsigned long long last_compact_traffic_;
 
 
 

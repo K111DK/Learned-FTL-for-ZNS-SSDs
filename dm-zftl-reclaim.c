@@ -410,6 +410,7 @@ int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_jo
 
     spin_lock_irqsave(&dm_zftl->record_lock_, flags);
     dm_zftl->cache_2_zns_reclaim_write_traffic_ += job->nr_blocks;
+    dm_zftl->total_write_traffic_sec_ += dmz_blk2sect(job->nr_blocks);
     dm_zftl->last_compact_traffic_ += job->nr_blocks;
     spin_unlock_irqrestore(&dm_zftl->record_lock_, flags);
     dm_zftl_lsm_tree_try_compact(dm_zftl);

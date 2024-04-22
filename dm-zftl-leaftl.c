@@ -1102,6 +1102,7 @@ struct segment * greedy_piecewise_linear_regression__(const unsigned int * lpn_a
     *seg_list = NULL;
     int state = STATE_FIRST;
     int start_idx = 0, idx = 0;
+    long long div;
     point curr;
     point s0, s1, cone_apex;
 
@@ -1199,9 +1200,18 @@ struct segment * greedy_piecewise_linear_regression__(const unsigned int * lpn_a
                     // k = 10 / 42
                     // I = 29400393716 / 42
 
+                    div = gcd(k.numerator, k.denominator);
+                    k.denominator = k.denominator / div;
+                    k.numerator = k.numerator / div;
+
                     interception.numerator =  ((long long)cone_apex.y *
                                                 (long long)k.denominator - (long long)k.numerator * (long long)cone_apex.x);
                     interception.denominator = k.denominator;
+
+                    div = gcd(interception.numerator, interception.denominator);
+                    interception.denominator = interception.denominator / div;
+                    interception.numerator = interception.numerator / div;
+
 
                     list_tail_add(seg_list,
                     gen_segment(lpn_array, start_idx, idx - start_idx, k, interception, start_ppn + start_idx));

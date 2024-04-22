@@ -1547,7 +1547,8 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
                        unsigned int maxlen){
     struct dm_zftl_target * dm_zftl = ti->private;
     int sz=0;
-    DMEMIT("<Dm-zftl>: status.......\n");
+    DMEMIT("\n");
+    DMEMIT("<=========================================>\n");
 #if DM_ZFTL_USING_LEA_FTL
     struct dm_zftl_compact_work * _work = kmalloc(sizeof(struct dm_zftl_compact_work), GFP_NOIO);
     _work->target = dm_zftl;
@@ -1640,8 +1641,7 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
                p99_level,
                p50_level);
     }
-
-
+    DMEMIT("<=========================================>\n");
 #else
 
 #endif
@@ -1677,6 +1677,11 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
     DMEMIT("Total pinned frame: %u\n", pinned_frame_cnt);
     DMEMIT("Total unpinned frame: %u\n", unpinned_frame_cnt);
     DMEMIT("Total on lru frame: %u\n", on_lru_frame_cnt);
+    DMEMIT("<=========================================>\n");
+    DMEMIT("Total foreground Write Traffic: %llu MiB\n", dm_zftl->foreground_write_traffic_ * 4 / 1024);
+    DMEMIT("Total foreground Read Traffic: %llu MiB\n", dm_zftl->foreground_read_traffic_ * 4 / 1024);
+    DMEMIT("Total Write Traffic: %llu MiB\n", dm_zftl->total_write_traffic_sec_ / (2 * 1024));
+    //DMEMIT("Write amplify factor :%u", dmz_sect2blk(dm_zftl->total_write_traffic_sec_) / dm_zftl->foreground_write_traffic_);
     return;
 }
 
