@@ -1592,7 +1592,6 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
             continue;
 
         level_sum += atomic_read(&frame->nr_level);
-
         while(level) {
             struct segment * segs = level->seg;
             while(segs) {

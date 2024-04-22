@@ -634,6 +634,7 @@ void lsm_tree_update_by_lpn_array(struct lsm_tree * lsm_tree, unsigned int * lpn
                             lsm_tree);
             wp += i - pre_index;
             pre_index = i;
+            pre_frame = curr_frame;
         }
     }
     segs = Regression(lpn_array + pre_index, i - pre_index, wp);
@@ -1555,10 +1556,10 @@ void lsm_tree_print_level(struct lsm_tree_level * level){
     printk(KERN_EMERG "\n<level>");
     while(seg){
         if(seg->is_seq_seg) {
-            printk(KERN_EMERG " [%llu %llu ] ", seg_start(seg), seg_end(seg));
+            printk(KERN_EMERG " [%llu %llu ] <%llu>", seg_start(seg), seg_end(seg), cal_ppn(seg->slope, seg->intercept,seg_start(seg)));
         }
         else{
-            printk(KERN_EMERG " [%llu %llu*] ", seg_start(seg), seg_end(seg));
+            printk(KERN_EMERG " [%llu %llu*] <%llu>", seg_start(seg), seg_end(seg), cal_ppn(seg->slope, seg->intercept,seg_start(seg)));
         }
         seg = seg->next;
     }
