@@ -11,5 +11,4 @@ filename=/dev/mapper/ZFTL
 do_verify=1
 continue_on_error=verify
 verify_dump=1
-time_based
 verify=crc32
