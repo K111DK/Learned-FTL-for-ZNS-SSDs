@@ -38,6 +38,8 @@
 #include <linux/kfifo.h>
 #include <linux/kernel.h>
 #include <linux/gcd.h>
+
+#define DM_ZFTL_MAX_RECLAIM_BUFFER 1
 #define KB 2 /* in sectors */
 #define MB 1024 * KB
 #define GB 1024 * MB
@@ -158,12 +160,25 @@ struct dm_zftl_io_work{
     void (* pin_cb_fn)(void * context);
     void * pin_cb_ctx;
 };
+struct copy_buffer {
+    void * buffer;
 
+    struct dm_zftl_p2l_info * lpn_buffer;
+    unsigned int * sorted_lpn_array;
+
+    unsigned int nr_blocks;
+    unsigned int nr_valid_blocks;
+};
 struct dm_zftl_reclaim_read_work{
     struct work_struct work;
     struct dm_zftl_target * target;
     void *copy_buffer;
     unsigned int *copy_lpn_buffer;
+};
+struct dm_zftl_p2l_info {
+    unsigned int ppn;
+    unsigned int lpn;
+    unsigned int vma_idx;
 };
 
 struct dm_zftl_compact_work{
@@ -229,8 +244,8 @@ struct dm_zftl_target {
     // lsm tree traffic since last compact
     unsigned long long last_compact_traffic_;
 
-
-
+    struct kfifo fg_reclaim_buffer_fifo;
+    struct kfifo bg_reclaim_buffer_fifo;
 
     /* For cloned BIOs to conventional zones */
     struct bio_set		bio_set;
@@ -264,6 +279,9 @@ struct dm_zftl_target {
 
 
     struct dm_zftl_reclaim_read_work *reclaim_work;
+
+    atomic_t nr_fg_reclaim;
+    atomic_t nr_bg_reclaim;
 };
 struct try_l2p_pin {
 
@@ -290,28 +308,26 @@ enum {
     DM_ZFTL_CACHE,
 };
 
-struct copy_buffer {
-    void * buffer;
-    unsigned int * lpn_buffer;
-    unsigned int nr_blocks;
-};
+
 void dm_zftl_do_background_reclaim(struct work_struct *work);
 void dm_zftl_do_foreground_reclaim(struct work_struct *work);
-void dm_zftl_do_reclaim(struct work_struct *work, struct zoned_dev *reclaim_from, struct zoned_dev *copy_to);
+void dm_zftl_do_reclaim_read(struct work_struct *work, struct zoned_dev *reclaim_from, struct zoned_dev *copy_to);
 sector_t dm_zftl_get_dev_addr(struct dm_zftl_target * dm_zftl, sector_t ppa);
 int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_table,unsigned int * lpn_array,sector_t ppn,unsigned int nr_block);
 void dm_zftl_reclaim_read_work(struct work_struct *work);
 unsigned int dm_zftl_get_reclaim_zone(struct zoned_dev * dev, struct dm_zftl_mapping_table * mappping_table);
 void * dm_zftl_init_copy_buffer(struct dm_zftl_target * dm_zftl);
-void * dm_zftl_get_buffer_block_addr(struct dm_zftl_target * dm_zftl, unsigned int idx);
 int dm_zftl_async_dm_io(unsigned int num_regions, struct dm_io_region *where, int rw, void *data, unsigned long *error_bits);
 sector_t dm_zftl_get_zone_start_vppn(struct zoned_dev * dev, unsigned int zone_id);
 int dm_zftl_ppn_is_valid(struct dm_zftl_mapping_table * mapping_table, sector_t ppn);
 void dm_zftl_copy_read_cb(unsigned long error, void * context);
 int dm_zftl_update_mapping_cache(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, sector_t nr_blocks);
 struct copy_job {
+    struct kfifo * fifo;
+    struct copy_buffer * copy_buffer;
     struct l2p_pin_work * pin_work_ctx;
     unsigned int reclaim_zone_id;
+    unsigned int reclaim_zone_start_ppn;
     unsigned int nr_blocks;
     unsigned int nr_read_complete;
     int read_complete;
@@ -332,10 +348,7 @@ struct copy_job {
     spinlock_t lock_;
 };
 
-int dm_zftl_valid_data_writeback(struct dm_zftl_target * dm_zftl, struct copy_job * job);
-void dm_zftl_read_valid_zone_data_to_buffer(void * context);
-
-
+void dm_zftl_valid_data_writeback(struct work_struct *work);
 struct zoned_dev {
     struct kfifo write_fifo;
 
@@ -391,7 +404,6 @@ int dm_zftl_init_bitmap(struct dm_zftl_target * dm_zftl);
 
 
 
-void dm_zftl_foreground_reclaim(struct dm_zftl_target * dm_zftl);
 struct zoned_dev * dm_zftl_get_background_io_dev(struct dm_zftl_target * dm_zftl);
 struct zoned_dev * dm_zftl_get_foregound_io_dev(struct dm_zftl_target * dm_zftl);
 sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, sector_t len);
@@ -413,7 +425,6 @@ void dm_zftl_zns_try_gc(struct dm_zftl_target * dm_zftl);
 //
 unsigned int dm_zftl_get_ppa_zone_id(struct dm_zftl_target * dm_zftl, sector_t ppa);
 struct zoned_dev * dm_zftl_get_ppa_dev(struct dm_zftl_target * dm_zftl, sector_t ppa);
-void dm_zftl_write_back_(struct work_struct *work);
 void dm_zftl_compact_work(struct work_struct *work);
 void dm_zftl_lsm_tree_try_compact(struct dm_zftl_target * dm_zftl);
 int dm_zftl_need_gc(struct dm_zftl_target * dm_zftl);
@@ -512,7 +523,6 @@ unsigned int dm_zftl_sftl_get_size(struct dm_zftl_mapping_table * mapping_table)
 void dm_zftl_try_evict(struct dm_zftl_target * dm_zftl, struct dm_zftl_l2p_mem_pool * l2p_cache);
 struct dm_zftl_io_work * dm_zftl_get_io_work(struct dm_zftl_target *dm_zftl, struct bio *bio);
 int dm_zftl_cmp_(const void *a,const void *b);
-int dm_zftl_get_sorted_vaild_lpn(struct copy_job * cp_job);
 struct l2p_pin_work * dm_zftl_init_pin_ctx(struct dm_zftl_target * dm_zftl, struct io_job * io_job);
 void lsm_tree_frame_status_check(struct lsm_tree * tree, status_type_t type,
                                  unsigned int status_flags, char *result,
@@ -520,5 +530,5 @@ void lsm_tree_frame_status_check(struct lsm_tree * tree, status_type_t type,
 void dm_zftl_io_work_(struct work_struct *work);
 #define DM_ZFTL_PAGE_SIZE (4096)// in bytes
 
-
+int dm_zftl_p2l_cmp_(const void *a,const void *b);
 #endif //DM_ZFTL_DM_ZFTL_H

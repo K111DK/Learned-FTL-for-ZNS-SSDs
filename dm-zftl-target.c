@@ -139,8 +139,8 @@ void dm_zftl_try_l2p_pin(struct work_struct * work){
         unsigned int i;
         unsigned int pre_frame, curr_frame;
         pre_frame = -1;
-        for(i = cp_job->lpn_start_idx; i < cp_job->lpn_start_idx + cp_job->nr_read_io; ++i){
-            curr_frame = cp_job->cp_lpn_array[i] / l2p_cache->lbns_in_frame;
+        for(i = 0; i < cp_job->nr_blocks; ++i){
+            curr_frame = cp_job->copy_buffer->lpn_buffer[i].lpn / l2p_cache->lbns_in_frame;
             if(curr_frame != pre_frame){
                 struct dm_zftl_l2p_frame * frame = l2p_cache->l2f_table[curr_frame];
                 struct frame_no_node * frame_node = kvmalloc(sizeof(struct frame_no_node), GFP_KERNEL);
@@ -545,6 +545,7 @@ int dm_zftl_set(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sect
     return 0;
 }
 
+//DO NOT LOCK IT
 int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_table,
                                         unsigned int * lpn_array,
                                         sector_t ppn,
@@ -930,10 +931,11 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
 
     if(start_ppa == DM_ZFTL_UNMAPPED_PPA){
         ret = -EIO;
-        printk(KERN_EMERG "[Write Error] ZNS free: %llu Cache free: %llu In proc reclaiming: %llu"
+        printk(KERN_EMERG "[Write Error] ZNS free: %llu Cache free: %llu In proc fg reclaiming: %llu In proc bg reclaiming: %llu"
                     ,atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_free_zone)
                     ,atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_free_zone)
-                    ,atomic_read(&dm_zftl->nr_reclaim_work));
+                    ,atomic_read(&dm_zftl->nr_fg_reclaim)
+                    ,atomic_read(&dm_zftl->nr_bg_reclaim));
         mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
         goto FINISH;
     }
@@ -953,8 +955,6 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
     where->count = dmz_blk2sect(dmz_bio_blocks(bio));
 
 
-    if(atomic_read(&dm_zftl->nr_reclaim_work))
-        io_schedule();
 
 
     dm_zftl_update_mapping_cache(dm_zftl->mapping_table,
@@ -1485,6 +1485,8 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     }
 
     atomic_set(&dmz->nr_reclaim_work, 0);
+    atomic_set(&dmz->nr_fg_reclaim, 0);
+    atomic_set(&dmz->nr_bg_reclaim, 0);
     atomic_set(&dmz->max_reclaim_read_work, DM_ZFTL_RECLAIM_MAX_READ_NUM_DEFAULT);
 
 
@@ -1751,8 +1753,9 @@ static struct target_type dm_zftl_type = {
         .status = dm_zftl_status,
 };
 
-
-
+struct zoned_dev * dm_zftl_get_background_io_dev(struct dm_zftl_target * dm_zftl){
+    return dm_zftl->zone_device;
+}
 
 struct zoned_dev * dm_zftl_get_foregound_io_dev(struct dm_zftl_target * dm_zftl){
     /* Do we need this ? */
