@@ -740,6 +740,7 @@ sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, sector_t len){
     if(!opened_zone){
         printk(KERN_EMERG "Error: Dev:%s no remaining free zone",
                 dm_zftl_is_cache(dev) == DM_ZFTL_CACHE ? "Cache":"ZNS");
+        BUG_ON(1);
         return DM_ZFTL_UNMAPPED_PPA;
     }
 
@@ -759,6 +760,7 @@ sector_t dm_zftl_get_seq_wp(struct zoned_dev * dev, sector_t len){
     if(ret){
         printk(KERN_EMERG "Error: Dev:%s can't alloc free zone",
                dm_zftl_is_cache(dev) == DM_ZFTL_CACHE ? "Cache":"ZNS");
+        BUG_ON(1);
         return DM_ZFTL_UNMAPPED_PPA;
     }
     opened_zone = dev->zoned_metadata->opened_zoned;
@@ -1817,7 +1819,7 @@ int dm_zftl_reset_all(struct zoned_dev * dev){
 int dm_zftl_reset_zone(struct zoned_dev * dev, struct zone_info *zone)
 {
 
-    struct zone_link_entry * zone_link = (struct zone_link_entry *)vmalloc(sizeof (struct zone_link_entry));
+    struct zone_link_entry * zone_link = (struct zone_link_entry *)kmalloc(sizeof (struct zone_link_entry), GFP_KERNEL);
     zone_link->id = zone->id;
     list_add(&zone_link->link, &dev->zoned_metadata->free_zoned);
     atomic_inc(&dev->zoned_metadata->nr_free_zone);
