@@ -219,6 +219,10 @@ struct dm_zftl_target {
     void * dummy_l2p_buffer;
 
     spinlock_t record_lock_;
+
+    unsigned long long fg_reclaim_cnt;
+    unsigned long long bg_reclaim_cnt;
+
     unsigned long long cache_2_zns_reclaim_write_traffic_;
     unsigned long long cache_2_zns_reclaim_read_traffic_;
 
@@ -370,6 +374,9 @@ struct zoned_dev {
 struct dev_metadata {
     sector_t addr_offset;
     /* Zone information array */
+    int dev_gc_l1_theshold;
+    int dev_gc_l2_theshold;
+
     struct zone_info * zones;
     atomic_t nr_open_zone;
     struct list_head open_zoned;
