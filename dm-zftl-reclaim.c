@@ -15,6 +15,7 @@
 //  VI.     Construct Page-list Kick-off write back io
 
 void * dm_zftl_init_copy_buffer(struct dm_zftl_target * dm_zftl){
+    int ret;
     ret = kfifo_alloc(&dm_zftl->fg_reclaim_buffer_fifo, sizeof(struct copy_buffer) * DM_ZFTL_MAX_RECLAIM_BUFFER, GFP_KERNEL);
     if(ret){
         printk(KERN_EMERG "[Reclaim] fifo alloc fail!");
@@ -82,7 +83,7 @@ void dm_zftl_zns_try_gc(struct dm_zftl_target * dm_zftl){
         atomic_inc(&dm_zftl->nr_bg_reclaim);
         struct copy_job * copy_job = kmalloc(sizeof(struct copy_job), GFP_NOIO);
         INIT_WORK(&copy_job->work, dm_zftl_do_background_reclaim);
-        copy_job->target = dm_zftl;
+        copy_job->dm_zftl = dm_zftl;
         queue_work(dm_zftl->reclaim_read_wq, &copy_job->work);
     }
 }
@@ -100,7 +101,7 @@ int dm_zftl_need_gc(struct dm_zftl_target * dm_zftl){
 
 void dm_zftl_do_background_reclaim(struct work_struct *work){
     struct copy_job * copy_job = container_of(work, struct copy_job, work);
-    struct dm_zftl_target * dm_zftl = copy_job->target;
+    struct dm_zftl_target * dm_zftl = copy_job->dm_zftl;
     dm_zftl_do_reclaim_read(work, dm_zftl->zone_device
             , dm_zftl->zone_device);
 }
@@ -124,14 +125,14 @@ void dm_zftl_cache_try_reclaim(struct dm_zftl_target * dm_zftl){
         atomic_inc(&dm_zftl->nr_fg_reclaim);
         struct copy_job * read_work = kmalloc(sizeof(struct copy_job), GFP_NOIO);
         INIT_WORK(&read_work->work, dm_zftl_do_foreground_reclaim);
-        read_work->target = dm_zftl;
+        read_work->dm_zftl = dm_zftl;
         queue_work(dm_zftl->reclaim_read_wq, &read_work->work);
     }
 }
 // Get free zone id and free buffer, if fail then retry. o.w kick-off read
 void dm_zftl_do_foreground_reclaim(struct work_struct *work){
     struct copy_job * copy_job = container_of(work, struct copy_job, work);
-    struct dm_zftl_target * dm_zftl = copy_job->target;
+    struct dm_zftl_target * dm_zftl = copy_job->dm_zftl;
     dm_zftl_do_reclaim_read(work, dm_zftl->cache_device
                             , dm_zftl->zone_device);
 }
@@ -186,7 +187,8 @@ void dm_zftl_do_reclaim_read(struct work_struct *work, struct zoned_dev *reclaim
     iorq.notify.fn = dm_zftl_reclaim_read_cb;
     iorq.notify.context = cp_job;
     iorq.client = cp_job->dm_zftl->io_client;
-    ret = dm_io(&iorq, 1, &where[i], error_bits);
+    unsigned long error_bits;
+    ret = dm_io(&iorq, 1, where, error_bits);
     return;
 
     REQUEUE:
@@ -232,8 +234,8 @@ void dm_zftl_reclaim_read_cb(unsigned long error, void * context){
 }
 
 struct page_list * dm_zftl_construct_wb_page_list(struct copy_buffer * copy_buffer){
-    struct page_list * write_back_page_list = NULL,
-    struct page_list * current = NULL;
+    struct page_list * write_back_page_list = NULL;
+    struct page_list * curr = NULL;
     unsigned int i = 0;
     char * vma_start = (char *)copy_buffer->buffer;
     unsigned int vma_idx;
@@ -248,11 +250,11 @@ struct page_list * dm_zftl_construct_wb_page_list(struct copy_buffer * copy_buff
         cp_page_list->page = cp_page;
         cp_page_list->next = NULL;
 
-        if(current) {
-            current->next = cp_page_list;
-            current = cp_page_list;
+        if(curr) {
+            curr->next = cp_page_list;
+            curr = cp_page_list;
         }else{
-            current = cp_page_list;
+            curr = cp_page_list;
             write_back_page_list = cp_page_list;
         }
 
@@ -266,6 +268,16 @@ void dm_zftl_valid_data_writeback(struct work_struct *work){
     unsigned int i = 0;
     unsigned int ppn = 0;
     unsigned int next_valid_idx = 0;
+
+    struct zoned_dev * wb_dev = copy_job->writeback_to;
+    sector_t nr_sectors = dmz_blk2sect(copy_job->copy_buffer->nr_valid_blocks);
+    struct dm_io_region * where = (struct dm_io_region *)vmalloc(sizeof (struct dm_io_region));
+    sector_t start_ppa = dm_zftl_get_seq_wp(wb_dev, nr_sectors);
+    unsigned long flags;
+    spin_lock_irqsave(&copy_job->writeback_to->zoned_metadata->opened_zoned->lock_, flags);
+    copy_job->writeback_to->zoned_metadata->opened_zoned->wp += nr_sectors;
+    spin_unlock_irqrestore(&copy_job->writeback_to->zoned_metadata->opened_zoned->lock_, flags);
+
 
     mutex_lock(&dm_zftl->mapping_table->l2p_lock);
     for(i = 0; i < copy_job->nr_blocks; ++i){
@@ -287,15 +299,6 @@ void dm_zftl_valid_data_writeback(struct work_struct *work){
                                         copy_job->copy_buffer->nr_valid_blocks);
     mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
 
-
-    struct zoned_dev * wb_dev = copy_job->writeback_to;
-    sector_t nr_sectors = dmz_blk2sect(copy_job->nr_valid_blocks);
-    struct dm_io_region * where = (struct dm_io_region *)vmalloc(sizeof (struct dm_io_region));
-    sector_t start_ppa = dm_zftl_get_seq_wp(wb_dev, nr_sectors);
-    unsigned long flags;
-    spin_lock_irqsave(&copy_job->writeback_to->zoned_metadata->opened_zoned->lock_, flags);
-    copy_job->writeback_to->zoned_metadata->opened_zoned->wp += nr_sectors;
-    spin_unlock_irqrestore(&copy_job->writeback_to->zoned_metadata->opened_zoned->lock_, flags);
 
     /* We can only have one outstanding write at a time */
     while(test_and_set_bit_lock(DMZAP_WR_OUTSTANDING,
@@ -333,7 +336,7 @@ void dm_zftl_valid_data_writeback(struct work_struct *work){
     iorq.notify.context = copy_job;
     iorq.client = dm_zftl->io_client;
     ret = dm_io(&iorq, 1, where, error_bits);
-    return 1;
+    return;
 }
 
 void dm_zftl_valid_data_writeback_cb(unsigned long error, void * context){
@@ -347,7 +350,7 @@ void dm_zftl_valid_data_writeback_cb(unsigned long error, void * context){
     //TODO:Fix metadata update and zone reset
     clear_bit_unlock(DMZAP_WR_OUTSTANDING, &dm_zftl->zone_device->write_bitmap);
     dm_zftl_reset_zone(copy_job->copy_from,
-                       copy_job->copy_from->zoned_metadata->zones[copy_job->reclaim_zone_id]);
+                       &copy_job->copy_from->zoned_metadata->zones[copy_job->reclaim_zone_id]);
 
     if(dm_zftl_is_cache(copy_job->copy_from))
         atomic_dec(&dm_zftl->nr_fg_reclaim);
@@ -483,9 +486,9 @@ int dm_zftl_p2l_cmp_(const void *a,const void *b)
 {
     struct dm_zftl_p2l_info *da1 = (struct dm_zftl_p2l_info *)a;
     struct dm_zftl_p2l_info *da2 = (struct dm_zftl_p2l_info *)b;
-    if(*da1->lpn > *da2->lpn)
+    if(da1->lpn > da2->lpn)
         return 1;
-    else if(*da1->lpn < *da2->lpn)
+    else if(da1->lpn < da2->lpn)
         return -1;
     else
         return 0;

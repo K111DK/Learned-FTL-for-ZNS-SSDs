@@ -50,7 +50,7 @@
 #define DM_ZFTL_VMA_COPY_TEST 0
 #define DM_ZFTL_RECLAIM_ENABLE 1
 #define DM_ZFTL_RECLAIM_THRESHOLD 10
-#define DM_ZFTL_RECLAIM_INTERVAL 1 * GB
+#define DM_ZFTL_RECLAIM_INTERVAL 200 * MB
 #define DM_ZFTL_RECLAIM_DEBUG 0
 #define DM_ZFTL_RECLAIM_MAX_READ_NUM_DEFAULT 1
 
@@ -528,7 +528,11 @@ void lsm_tree_frame_status_check(struct lsm_tree * tree, status_type_t type,
                                  unsigned int status_flags, char *result,
                                  unsigned int maxlen);
 void dm_zftl_io_work_(struct work_struct *work);
+int dm_zftl_p2l_cmp_(const void *a,const void *b);
+unsigned int dm_zftl_zone_vaild_count(struct zoned_dev * dev, unsigned int zone_id, struct dm_zftl_mapping_table * mapping_table);
+void dm_zftl_valid_data_writeback_cb(unsigned long error, void * context);
+void dm_zftl_reclaim_read_cb(unsigned long error, void * context);
 #define DM_ZFTL_PAGE_SIZE (4096)// in bytes
 
-int dm_zftl_p2l_cmp_(const void *a,const void *b);
+
 #endif //DM_ZFTL_DM_ZFTL_H
