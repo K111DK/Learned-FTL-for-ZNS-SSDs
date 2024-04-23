@@ -13,6 +13,30 @@
 //  IV.     Pin all lpn
 //  V.      (Mapping-lock) Check l2p and vaild-bitmap, keep vaild lpn to lpn buffer and sort, update mapping
 //  VI.     Construct Page-list Kick-off write back io
+int dm_zftl_need_gc(struct dm_zftl_target * dm_zftl){
+    if(!DM_ZFTL_ZNS_GC_ENABLE)
+        return 0;
+    if(atomic_read(&dm_zftl->nr_bg_reclaim) >= atomic_read(&dm_zftl->max_reclaim_read_work))
+        return 0;
+    if(atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_free_zone) <= DM_ZFTL_ZNS_GC_THRESHOLD){
+        return 1;
+    }
+    return 0;
+}
+
+int dm_zftl_need_reclaim(struct dm_zftl_target * dm_zftl){
+    if(!DM_ZFTL_RECLAIM_ENABLE)
+        return 0;
+    if(atomic_read(&dm_zftl->nr_fg_reclaim) >= atomic_read(&dm_zftl->max_reclaim_read_work))
+        return 0;
+    if(dm_zftl->last_write_traffic_ >= DM_ZFTL_RECLAIM_INTERVAL){
+        dm_zftl->last_write_traffic_ = 0;
+        return 1;
+    }
+    if(atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_free_zone) <= DM_ZFTL_RECLAIM_THRESHOLD)
+        return 1;
+    return 0;
+}
 
 void * dm_zftl_init_copy_buffer(struct dm_zftl_target * dm_zftl){
     int ret;
@@ -84,40 +108,10 @@ void dm_zftl_zns_try_gc(struct dm_zftl_target * dm_zftl){
         struct copy_job * copy_job = kmalloc(sizeof(struct copy_job), GFP_NOIO);
         INIT_WORK(&copy_job->work, dm_zftl_do_background_reclaim);
         copy_job->dm_zftl = dm_zftl;
+        copy_job->fifo = NULL;
+        copy_job->reclaim_zone_id = 0;
         queue_work(dm_zftl->reclaim_read_wq, &copy_job->work);
     }
-}
-
-int dm_zftl_need_gc(struct dm_zftl_target * dm_zftl){
-    if(!DM_ZFTL_ZNS_GC_ENABLE)
-        return 0;
-    if(atomic_read(&dm_zftl->nr_bg_reclaim) >= atomic_read(&dm_zftl->max_reclaim_read_work))
-        return 0;
-    if(atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_full_zone) >= atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_free_zone)){
-        return 1;
-    }
-    return 0;
-}
-
-void dm_zftl_do_background_reclaim(struct work_struct *work){
-    struct copy_job * copy_job = container_of(work, struct copy_job, work);
-    struct dm_zftl_target * dm_zftl = copy_job->dm_zftl;
-    dm_zftl_do_reclaim_read(work, dm_zftl->zone_device
-            , dm_zftl->zone_device);
-}
-
-int dm_zftl_need_reclaim(struct dm_zftl_target * dm_zftl){
-    if(atomic_read(&dm_zftl->nr_fg_reclaim) >= atomic_read(&dm_zftl->max_reclaim_read_work))
-        return 0;
-    if(     (
-                    dm_zftl->last_write_traffic_ >= DM_ZFTL_RECLAIM_INTERVAL ||
-                    atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_free_zone) <= DM_ZFTL_RECLAIM_THRESHOLD
-            )
-            && DM_ZFTL_RECLAIM_ENABLE){
-        dm_zftl->last_write_traffic_ = 0;
-        return 1;
-    }
-    return 0;
 }
 
 void dm_zftl_cache_try_reclaim(struct dm_zftl_target * dm_zftl){
@@ -125,9 +119,18 @@ void dm_zftl_cache_try_reclaim(struct dm_zftl_target * dm_zftl){
         atomic_inc(&dm_zftl->nr_fg_reclaim);
         struct copy_job * copy_job = kmalloc(sizeof(struct copy_job), GFP_NOIO);
         copy_job->dm_zftl = dm_zftl;
+        copy_job->fifo = NULL;
+        copy_job->reclaim_zone_id = 0;
         INIT_WORK(&copy_job->work, dm_zftl_do_foreground_reclaim);
         queue_work(dm_zftl->reclaim_read_wq, &copy_job->work);
     }
+}
+
+void dm_zftl_do_background_reclaim(struct work_struct *work){
+    struct copy_job * copy_job = container_of(work, struct copy_job, work);
+    struct dm_zftl_target * dm_zftl = copy_job->dm_zftl;
+    dm_zftl_do_reclaim_read(work, dm_zftl->zone_device
+            , dm_zftl->zone_device);
 }
 // Get free zone id and free buffer, if fail then retry. o.w kick-off read
 void dm_zftl_do_foreground_reclaim(struct work_struct *work){
@@ -140,10 +143,8 @@ void dm_zftl_do_foreground_reclaim(struct work_struct *work){
 void dm_zftl_do_reclaim_read(struct work_struct *work, struct zoned_dev *reclaim_from, struct zoned_dev *copy_to){
     struct copy_job * cp_job = container_of(work, struct copy_job, work);
     struct dm_zftl_target * dm_zftl = cp_job->dm_zftl;
-    BUG_ON(!dm_zftl);
     struct kfifo * fifo = NULL;
     struct copy_buffer * copy_buffer = kvmalloc(sizeof(struct copy_buffer), GFP_KERNEL);
-    BUG_ON(!copy_buffer);
     copy_buffer->lpn_buffer = NULL;
     copy_buffer->buffer = NULL;
     copy_buffer->sorted_lpn_array = NULL;
@@ -152,20 +153,22 @@ void dm_zftl_do_reclaim_read(struct work_struct *work, struct zoned_dev *reclaim
 
     if(dm_zftl_is_cache(reclaim_from)){
         fifo = &dm_zftl->fg_reclaim_buffer_fifo;
-    }else{
+    }
+    else{
         fifo = &dm_zftl->bg_reclaim_buffer_fifo;
     }
     BUG_ON(!fifo);
-    ret = kfifo_out(fifo, copy_buffer, sizeof(struct copy_buffer));
-    if (!ret){
-        printk(KERN_EMERG "[Reclaim] get copy buffer error");
-        goto REQUEUE;
-    }
-    BUG_ON(!copy_buffer->lpn_buffer);
-    BUG_ON(!copy_buffer->buffer);
-    BUG_ON(!copy_buffer->sorted_lpn_array);
 
-    cp_job->fifo = fifo;
+    if(!cp_job->fifo){
+        ret = kfifo_out(fifo, copy_buffer, sizeof(struct copy_buffer));
+        if (!ret){
+            printk(KERN_EMERG "[Reclaim] get copy buffer error");
+            goto REQUEUE;
+        }
+        cp_job->fifo = fifo;
+    }
+
+
     cp_job->copy_buffer = copy_buffer;
     cp_job->copy_buffer->nr_valid_blocks = 0;
     cp_job->copy_buffer->nr_blocks = reclaim_from->zone_nr_blocks;
@@ -175,11 +178,14 @@ void dm_zftl_do_reclaim_read(struct work_struct *work, struct zoned_dev *reclaim
     cp_job->nr_blocks = reclaim_from->zone_nr_blocks;
     spin_lock_init(&cp_job->lock_);
 
-    unsigned int reclaim_zone_id = dm_zftl_get_reclaim_zone(cp_job->copy_from, dm_zftl->mapping_table);
-    cp_job->reclaim_zone_id = reclaim_zone_id;
-    if(!reclaim_zone_id) {
-        printk(KERN_EMERG "[Reclaim] get reclaim zone id error\n");
-        goto REQUEUE;
+    unsigned int reclaim_zone_id = 0;
+    if(!cp_job->reclaim_zone_id){
+        cp_job->reclaim_zone_id = dm_zftl_get_reclaim_zone(cp_job->copy_from, dm_zftl->mapping_table);
+        reclaim_zone_id = cp_job->reclaim_zone_id;
+        if(!reclaim_zone_id) {
+            printk(KERN_EMERG "[Reclaim] get reclaim zone id error\n");
+            goto REQUEUE;
+        }
     }
 
     unsigned int reclaim_zone_start_ppn = dm_zftl_get_zone_start_vppn(cp_job->copy_from, reclaim_zone_id);
@@ -204,8 +210,17 @@ void dm_zftl_do_reclaim_read(struct work_struct *work, struct zoned_dev *reclaim
     ret = dm_io(&iorq, 1, where, error_bits);
     return;
 
+
     REQUEUE:
+
+    if(( atomic_read(&reclaim_from->zoned_metadata->nr_free_zone) >= 5
+        || !atomic_read(&copy_to->zoned_metadata->nr_free_zone) ) && !(cp_job->reclaim_zone_id || cp_job->fifo) )
+        goto KILL_WORK;
+
     queue_work(dm_zftl->reclaim_read_wq, &cp_job->work);
+    return;
+
+    KILL_WORK:
     return;
 }
 
@@ -298,7 +313,6 @@ void dm_zftl_valid_data_writeback(struct work_struct *work){
             next_valid_idx++;
         }
     }
-    //printk(KERN_EMERG "[Reclaim] {%u / %u}", next_valid_idx, i);
 
     copy_job->copy_buffer->nr_valid_blocks = next_valid_idx;
 

@@ -7,6 +7,7 @@
 #ifndef LEAFTL_DM_ZFTL_LEAFTL_H
 #define LEAFTL_DM_ZFTL_LEAFTL_H
 #define DM_ZFTL_LEA_DEBUG 1
+#define DM_ZFTL_ZNS_GC_THRESHOLD 20
 #define seg_end(seg) (seg->start_lpn + seg->len)
 #define seg_start(seg) (seg->start_lpn)
 #define DM_ZFTL_LEA_ORIGIN 1
