@@ -222,6 +222,9 @@ struct dm_zftl_target {
 
     unsigned long long fg_reclaim_cnt;
     unsigned long long bg_reclaim_cnt;
+    unsigned long long extra_read_cnt;
+    unsigned long long pin_read_io_cnt;
+    unsigned long long pin_wb_io_cnt;
 
     unsigned long long cache_2_zns_reclaim_write_traffic_;
     unsigned long long cache_2_zns_reclaim_read_traffic_;
