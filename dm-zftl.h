@@ -215,7 +215,14 @@ struct dm_zftl_l2p_mem_pool{
 //		  io = TAILQ_FIRST(&dev->rd_sq);
 //		  TAILQ_REMOVE(&dev->rd_sq, io, queue_entry);
 };
-
+struct iorq_dispatch_work {
+    struct work_struct work;
+    struct dm_io_request *iorq;
+    struct dm_io_region *where;
+    unsigned int num;
+    void (* cb_fn)(unsigned long error, void * context);
+    void * context;
+};
 
 struct dm_zftl_target {
 
@@ -287,6 +294,8 @@ struct dm_zftl_target {
     struct workqueue_struct *io_kick_off_wq;
     struct workqueue_struct *get_mapping_wq;
 
+    struct workqueue_struct *iorq_dispatch_wq;
+
 
     struct dm_zftl_reclaim_read_work *reclaim_work;
 
@@ -332,6 +341,7 @@ sector_t dm_zftl_get_zone_start_vppn(struct zoned_dev * dev, unsigned int zone_i
 int dm_zftl_ppn_is_valid(struct dm_zftl_mapping_table * mapping_table, sector_t ppn);
 void dm_zftl_copy_read_cb(unsigned long error, void * context);
 int dm_zftl_update_mapping_cache(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, sector_t nr_blocks);
+void dm_zftl_iorq_dispatch(struct work_struct * work);
 struct copy_job {
     struct kfifo * fifo;
     struct copy_buffer * copy_buffer;

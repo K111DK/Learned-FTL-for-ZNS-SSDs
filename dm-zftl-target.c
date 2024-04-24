@@ -403,29 +403,38 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
     return DM_MAPIO_SUBMITTED;
 }
 void dm_zftl_correct_predict_ppn(unsigned long error, void * context){
+    struct iorq_dispatch_work * iorq_work = kvmalloc(sizeof(struct iorq_dispatch_work), GFP_KERNEL);
     struct dm_zftl_read_io * read_io =(struct dm_zftl_read_io *) context;
     struct bio * bio = read_io->bio;
     struct dm_zftl_target * dm_zftl = read_io->dm_zftl;
-    bio_endio(bio);
-    return;
-
     struct dm_io_region * where = kvmalloc(sizeof(struct dm_io_region), GFP_KERNEL | __GFP_ZERO);
-
     struct zoned_dev * dev = dm_zftl_get_ppa_dev(dm_zftl, dmz_blk2sect(read_io->ppn));
     where->bdev = dev->bdev;
     where->sector = dm_zftl_get_dev_addr(dm_zftl, dmz_blk2sect(read_io->ppn));
     where->count = dmz_blk2sect(1);
 
-    struct dm_io_request iorq;
-    iorq.bi_op = REQ_OP_READ;
-    iorq.bi_op_flags = 0;
-    iorq.mem.type = DM_IO_BIO;
-    iorq.mem.ptr.bio = read_io->bio;
-    iorq.notify.fn = dm_zftl_dm_io_read_cb;
-    iorq.notify.context = read_io;
-    iorq.client = dm_zftl->io_client;
-    dm_io(&iorq, 1, where, NULL);
+    struct dm_io_request * iorq = kvmalloc(sizeof(struct iorq_dispatch_work), GFP_KERNEL);
+    iorq->bi_op = REQ_OP_READ;
+    iorq->bi_op_flags = 0;
+    iorq->mem.type = DM_IO_BIO;
+    iorq->mem.ptr.bio = read_io->bio;
+    iorq->notify.fn = dm_zftl_dm_io_read_cb;
+    iorq->notify.context = read_io;
+    iorq->client = dm_zftl->io_client;
+
+    iorq_work->iorq = iorq;
+    iorq_work->where = where;
+    iorq_work->num = 1;
+
+    INIT_WORK(&iorq_work->work, dm_zftl_iorq_dispatch);
+    queue_work(dm_zftl->iorq_dispatch_wq, &iorq_work->work);
 }
+
+void dm_zftl_iorq_dispatch(struct work_struct * work){
+    struct iorq_dispatch_work * iorq_work = container_of(work, struct iorq_dispatch_work, work);
+    dm_io(iorq_work->iorq, 1, iorq_work->where, NULL);
+}
+
 void dm_zftl_dm_io_read_cb(unsigned long error, void * context){
     struct dm_zftl_read_io * read_io = (struct dm_zftl_read_io *)context;
     struct bio * bio = read_io->bio;
@@ -1060,6 +1069,13 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     dmz->l2p_try_pin_wq = alloc_ordered_workqueue("dmz_zftl_l2p_try_pin", WQ_MEM_RECLAIM, 0);
     if (!dmz->l2p_try_pin_wq) {
         ti->error = "Create try pin workqueue failed";
+        ret = -ENOMEM;
+        goto err_dev;
+    }
+
+    dmz->iorq_dispatch_wq = alloc_ordered_workqueue("dmz_zftl_dispatch_iorq", WQ_MEM_RECLAIM, 0);
+    if (!dmz->iorq_dispatch_wq) {
+        ti->error = "Create try iorq workqueue failed";
         ret = -ENOMEM;
         goto err_dev;
     }
