@@ -39,6 +39,12 @@
 #include <linux/kernel.h>
 #include <linux/gcd.h>
 
+
+#define DM_ZFTL_L2P_PIN (0)
+#define DM_ZFTL_COMPACT_ENABLE 1
+#define DM_ZFTL_COMPACT_INTERVAL 2000000 //50 * 4MB = 200MB
+#define DM_ZFTL_FOREGROUND_RECLAIM_IO_BLOCK_THESHOLD 2
+#define DM_ZFTL_FOREGROUND_IO_BLOCK_THESHOLD 2
 #define DM_ZFTL_MAX_RECLAIM_BUFFER 1
 #define KB 2 /* in sectors */
 #define MB 1024 * KB
@@ -65,13 +71,10 @@
 #define DM_ZFTL_DEBUG 0
 #define DM_ZFTL_MIN_BIOS 8192
 #define BDEVNAME_SIZE 256
-#define DM_ZFTL_COMPACT_ENABLE 1
-#define DM_ZFTL_COMPACT_INTERVAL 2000000 //50 * 4MB = 200MB
 /*
  * Creates block devices with 4KB blocks, always.
  * copy from dm-zoned
  */
-#define DM_ZFTL_L2P_PIN 0
 #define DMZ_BLOCK_SHIFT		12
 #define DMZ_BLOCK_SIZE		(1 << DMZ_BLOCK_SHIFT)
 #define DMZ_BLOCK_MASK		(DMZ_BLOCK_SIZE - 1)
@@ -542,6 +545,8 @@ int dm_zftl_p2l_cmp_(const void *a,const void *b);
 unsigned int dm_zftl_zone_vaild_count(struct zoned_dev * dev, unsigned int zone_id, struct dm_zftl_mapping_table * mapping_table);
 void dm_zftl_valid_data_writeback_cb(unsigned long error, void * context);
 void dm_zftl_reclaim_read_cb(unsigned long error, void * context);
+void dm_zftl_queue_writeback( void * context);
+void dm_zftl_dm_io_read_cb(unsigned long error, void * context);
 #define DM_ZFTL_PAGE_SIZE (4096)// in bytes
 
 

@@ -27,6 +27,8 @@ int dm_zftl_need_gc(struct dm_zftl_target * dm_zftl){
 int dm_zftl_need_reclaim(struct dm_zftl_target * dm_zftl){
     if(!DM_ZFTL_RECLAIM_ENABLE)
         return 0;
+    if(atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_free_zone) <= DM_ZFTL_FOREGROUND_RECLAIM_IO_BLOCK_THESHOLD)
+        return 0;
     if(atomic_read(&dm_zftl->nr_fg_reclaim) >= atomic_read(&dm_zftl->max_reclaim_read_work))
         return 0;
     if(dm_zftl->last_write_traffic_ >= DM_ZFTL_RECLAIM_INTERVAL){
@@ -117,7 +119,7 @@ void dm_zftl_zns_try_gc(struct dm_zftl_target * dm_zftl){
 void dm_zftl_cache_try_reclaim(struct dm_zftl_target * dm_zftl){
     if(dm_zftl_need_reclaim(dm_zftl)){
         atomic_inc(&dm_zftl->nr_fg_reclaim);
-        struct copy_job * copy_job = kmalloc(sizeof(struct copy_job), GFP_NOIO);
+        struct copy_job * copy_job = kmalloc(sizeof(struct copy_job), GFP_KERNEL);
         copy_job->dm_zftl = dm_zftl;
         copy_job->fifo = NULL;
         copy_job->reclaim_zone_id = 0;
@@ -244,10 +246,10 @@ void dm_zftl_reclaim_read_cb(unsigned long error, void * context){
 
 #if DM_ZFTL_L2P_PIN
     //kick-off pin work
-    copy_job->pin_cb_fn = dm_zftl_valid_data_writeback;
-    copy_job->pin_cb_ctx = (struct work_struct *)&copy_job->work;
-    struct io_job * io_job = kmalloc(sizeof(struct io_job), GFP_NOIO);
-    io_job->copy_job = cp_job;
+    copy_job->pin_cb_fn = dm_zftl_queue_writeback;
+    copy_job->pin_cb_ctx = (void *)copy_job;
+    struct io_job * io_job = kvmalloc(sizeof(struct io_job), GFP_KERNEL);
+    io_job->cp_job = copy_job;
     io_job->flags = CP_JOB;
     struct try_l2p_pin * try_pin = kvmalloc(sizeof(struct try_l2p_pin), GFP_KERNEL);
     try_pin->dm_zftl = dm_zftl;
@@ -256,9 +258,14 @@ void dm_zftl_reclaim_read_cb(unsigned long error, void * context){
     queue_work(dm_zftl->l2p_try_pin_wq, &try_pin->work);
 #else
     //kick-off write-back
+    dm_zftl_queue_writeback(copy_job);
+#endif
+}
+
+void dm_zftl_queue_writeback( void * context){
+    struct copy_job * copy_job = context;
     INIT_WORK(&copy_job->work, dm_zftl_valid_data_writeback);
     queue_work(copy_job->dm_zftl->reclaim_write_wq, &copy_job->work);
-#endif
 }
 
 struct page_list * dm_zftl_construct_wb_page_list(struct copy_buffer * copy_buffer){
@@ -373,6 +380,12 @@ void dm_zftl_valid_data_writeback(struct work_struct *work){
     iorq.notify.context = copy_job;
     iorq.client = dm_zftl->io_client;
     ret = dm_io(&iorq, 1, where, error_bits);
+
+    struct zone_info * zone = &copy_job->copy_from->zoned_metadata->zones[copy_job->reclaim_zone_id];
+    BUG_ON(!zone);
+    dm_zftl_reset_zone(copy_job->copy_from,
+                       zone);
+
     return;
 }
 
@@ -386,10 +399,6 @@ void dm_zftl_valid_data_writeback_cb(unsigned long error, void * context){
 
     //TODO:Fix metadata update and zone reset
     clear_bit_unlock(DMZAP_WR_OUTSTANDING, &dm_zftl->zone_device->write_bitmap);
-    struct zone_info * zone = &copy_job->copy_from->zoned_metadata->zones[copy_job->reclaim_zone_id];
-    BUG_ON(!zone);
-    dm_zftl_reset_zone(copy_job->copy_from,
-                       zone);
 
     if(dm_zftl_is_cache(copy_job->copy_from))
         atomic_dec(&dm_zftl->nr_fg_reclaim);
@@ -409,11 +418,8 @@ void dm_zftl_valid_data_writeback_cb(unsigned long error, void * context){
     dm_zftl->last_compact_traffic_ += copy_job->copy_buffer->nr_valid_blocks;
     spin_unlock_irqrestore(&dm_zftl->record_lock_, flags);
 
-    dm_zftl_zns_try_gc(dm_zftl);
-    dm_zftl_cache_try_reclaim(dm_zftl);
-    dm_zftl_lsm_tree_try_compact(dm_zftl);
 #if DM_ZFTL_L2P_PIN
-    dm_zftl_unpin(cp_job->pin_work_ctx);
+    dm_zftl_unpin(copy_job->pin_work_ctx);
 #endif
 
 }
