@@ -221,9 +221,6 @@ void dm_zftl_bio_endio(struct bio *bio, blk_status_t status)
     if (status != BLK_STS_OK && bio->bi_status == BLK_STS_OK)
         bio->bi_status = status;
 
-//    if (bioctx->dev && bio->bi_status != BLK_STS_OK)
-//        bioctx->dev->flags |= DMZ_CHECK_BDEV;
-
     if (bioctx->io_complete == DM_ZFTL_IO_COMPLETE) {
         bio_endio(bio);
     }
@@ -314,7 +311,7 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
 
     unsigned long flags;
     unsigned int nr_blocks = dmz_bio_blocks(bio);
-    struct dm_io_region * where = kvmalloc(sizeof(struct dm_io_region), GFP_KERNEL | __GFP_ZERO);
+    struct dm_io_region where;
 
     if(nr_blocks > 1){
         printk(KERN_EMERG "Error got read bio > 1 blk");
@@ -368,9 +365,9 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
 
 
     dev = dm_zftl_get_ppa_dev(dm_zftl, dmz_blk2sect(cal_ppn));
-    where->bdev = dev->bdev;
-    where->sector = dm_zftl_get_dev_addr(dm_zftl, dmz_blk2sect(cal_ppn));
-    where->count = dmz_blk2sect(1);
+    where.bdev = dev->bdev;
+    where.sector = dm_zftl_get_dev_addr(dm_zftl, dmz_blk2sect(cal_ppn));
+    where.count = dmz_blk2sect(1);
 
     if(do_correct_extra_read){
 
@@ -383,7 +380,7 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
             iorq.notify.fn = dm_zftl_correct_predict_ppn;
             iorq.notify.context = read_io;
             iorq.client = dm_zftl->io_client;
-            dm_io(&iorq, 1, where, NULL);
+            dm_io(&iorq, 1, &where, NULL);
 
     }else{
 //
@@ -396,7 +393,7 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
             iorq.notify.fn = dm_zftl_dm_io_read_cb;
             iorq.notify.context = read_io;
             iorq.client = dm_zftl->io_client;
-            dm_io(&iorq, 1, where, NULL);
+            dm_io(&iorq, 1, &where, NULL);
 
     }
 
@@ -432,7 +429,12 @@ void dm_zftl_correct_predict_ppn(unsigned long error, void * context){
 
 void dm_zftl_iorq_dispatch(struct work_struct * work){
     struct iorq_dispatch_work * iorq_work = container_of(work, struct iorq_dispatch_work, work);
-    dm_io(iorq_work->iorq, 1, iorq_work->where, NULL);
+    struct dm_io_request iorq = *iorq_work->iorq;
+    struct dm_io_region where = *iorq_work->where;
+    kvfree(iorq_work->where);
+    kvfree(iorq_work->iorq);
+    kvfree(iorq_work);
+    dm_io(&iorq, 1, &where, NULL);
 }
 
 void dm_zftl_dm_io_read_cb(unsigned long error, void * context){
@@ -638,6 +640,8 @@ void dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
             ret = -EIO;
     }
 
+    kvfree(io->io_job);
+    kvfree(io);
     return;
 
     REQUEUE_WRITE:
@@ -744,6 +748,7 @@ static int dm_zftl_map(struct dm_target *ti, struct bio *bio)
     struct io_job * io_job = kvmalloc(sizeof(struct io_job), GFP_KERNEL);
     io_job->flags = IO_WORK;
     io_job->io_work = io_work;
+    io_work->io_job = io_job;
 
     if(bio_op(bio) != REQ_OP_READ && bio_op(bio) != REQ_OP_WRITE){
         return DM_MAPIO_SUBMITTED;
@@ -1142,7 +1147,7 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
     DMEMIT("\n");
     DMEMIT("<=========================================>\n");
 #if DM_ZFTL_USING_LEA_FTL
-    struct dm_zftl_compact_work * _work = kmalloc(sizeof(struct dm_zftl_compact_work), GFP_NOIO);
+    struct dm_zftl_compact_work * _work = kvmalloc(sizeof(struct dm_zftl_compact_work), GFP_NOIO);
     _work->target = dm_zftl;
     dm_zftl_compact_work((struct work_struct *)_work);
 

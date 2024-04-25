@@ -13,6 +13,37 @@
 //  IV.     Pin all lpn
 //  V.      (Mapping-lock) Check l2p and vaild-bitmap, keep vaild lpn to lpn buffer and sort, update mapping
 //  VI.     Construct Page-list Kick-off write back io
+struct page_list * dm_zftl_build_page_list(unsigned int nr){
+    struct page_list * write_back_page_list = NULL;
+    struct page_list * curr = NULL;
+    unsigned int i = 0;
+    for(i = 0; i < nr; ++i){
+        struct page * cp_page = NULL;
+        struct page_list * cp_page_list = kvmalloc(sizeof(struct page_list), GFP_KERNEL);
+        cp_page_list->page = cp_page;
+        cp_page_list->next = NULL;
+
+        if(curr) {
+            curr->next = cp_page_list;
+            curr = cp_page_list;
+        }else{
+            curr = cp_page_list;
+            write_back_page_list = cp_page_list;
+        }
+    }
+    return write_back_page_list;
+}
+void dm_zftl_free_page_list(struct page_list * pg_list){
+    if(!pg_list)
+        return;
+    struct page_list * pre = pg_list;
+    while(pg_list){
+        pre = pg_list;
+        pg_list = pg_list->next;
+        kvfree(pre);
+    }
+    return;
+}
 int dm_zftl_need_gc(struct dm_zftl_target * dm_zftl){
     if(!DM_ZFTL_ZNS_GC_ENABLE)
         return 0;
@@ -55,6 +86,7 @@ void * dm_zftl_init_copy_buffer(struct dm_zftl_target * dm_zftl){
     unsigned int i = 0;
     for(i = 0; i < DM_ZFTL_MAX_RECLAIM_BUFFER; ++i){
         struct copy_buffer * buffer = kvmalloc(sizeof(struct copy_buffer), GFP_KERNEL);
+        buffer->wb_pa_list = dm_zftl_build_page_list(dm_zftl->zone_device->zone_nr_blocks);
         buffer->nr_blocks = dm_zftl->zone_device->zone_nr_blocks;
         buffer->buffer = vmalloc(BLOCK_4K_SIZE * dm_zftl->zone_device->zone_nr_blocks);
         if(buffer->buffer == NULL){
@@ -80,6 +112,7 @@ void * dm_zftl_init_copy_buffer(struct dm_zftl_target * dm_zftl){
 
     for(i = 0; i < DM_ZFTL_MAX_RECLAIM_BUFFER; ++i){
         struct copy_buffer * buffer = kvmalloc(sizeof(struct copy_buffer), GFP_KERNEL);
+        buffer->wb_pa_list = dm_zftl_build_page_list(dm_zftl->zone_device->zone_nr_blocks);
         buffer->nr_blocks = dm_zftl->zone_device->zone_nr_blocks;
         buffer->buffer = vmalloc(BLOCK_4K_SIZE * dm_zftl->zone_device->zone_nr_blocks);
         if(buffer->buffer == NULL){
@@ -103,11 +136,10 @@ void * dm_zftl_init_copy_buffer(struct dm_zftl_target * dm_zftl){
     }
     return 0;
 }
-
 void dm_zftl_zns_try_gc(struct dm_zftl_target * dm_zftl){
     if(dm_zftl_need_gc(dm_zftl)){
         atomic_inc(&dm_zftl->nr_bg_reclaim);
-        struct copy_job * copy_job = kmalloc(sizeof(struct copy_job), GFP_NOIO);
+        struct copy_job * copy_job = kvmalloc(sizeof(struct copy_job), GFP_NOIO);
         INIT_WORK(&copy_job->work, dm_zftl_do_background_reclaim);
         copy_job->dm_zftl = dm_zftl;
         copy_job->fifo = NULL;
@@ -119,7 +151,7 @@ void dm_zftl_zns_try_gc(struct dm_zftl_target * dm_zftl){
 void dm_zftl_cache_try_reclaim(struct dm_zftl_target * dm_zftl){
     if(dm_zftl_need_reclaim(dm_zftl)){
         atomic_inc(&dm_zftl->nr_fg_reclaim);
-        struct copy_job * copy_job = kmalloc(sizeof(struct copy_job), GFP_KERNEL);
+        struct copy_job * copy_job = kvmalloc(sizeof(struct copy_job), GFP_KERNEL);
         copy_job->dm_zftl = dm_zftl;
         copy_job->fifo = NULL;
         copy_job->reclaim_zone_id = 0;
@@ -193,12 +225,12 @@ void dm_zftl_do_reclaim_read(struct work_struct *work, struct zoned_dev *reclaim
     unsigned int reclaim_zone_start_ppn = dm_zftl_get_zone_start_vppn(cp_job->copy_from, reclaim_zone_id);
     cp_job->reclaim_zone_start_ppn = reclaim_zone_start_ppn;
 
-    struct dm_io_region * where = kvmalloc(sizeof(struct dm_io_region), GFP_KERNEL | __GFP_ZERO);
+    struct dm_io_region where;//TODO: Do we need to free this?
 
-    where->bdev = cp_job->copy_from->bdev;
-    where->sector = dm_zftl_get_dev_addr(cp_job->dm_zftl
-                                        , dmz_blk2sect(reclaim_zone_start_ppn));
-    where->count = dmz_blk2sect(cp_job->copy_from->zone_nr_blocks);
+    where.bdev = cp_job->copy_from->bdev;
+    where.sector = dm_zftl_get_dev_addr(cp_job->dm_zftl
+                                      , dmz_blk2sect(reclaim_zone_start_ppn));
+    where.count = dmz_blk2sect(cp_job->copy_from->zone_nr_blocks);
 
     struct dm_io_request iorq;
     iorq.bi_op = REQ_OP_READ;
@@ -209,7 +241,7 @@ void dm_zftl_do_reclaim_read(struct work_struct *work, struct zoned_dev *reclaim
     iorq.notify.context = cp_job;
     iorq.client = cp_job->dm_zftl->io_client;
     unsigned long error_bits;
-    ret = dm_io(&iorq, 1, where, error_bits);
+    ret = dm_io(&iorq, 1, &where, error_bits);
     return;
 
 
@@ -268,32 +300,18 @@ void dm_zftl_queue_writeback( void * context){
     queue_work(copy_job->dm_zftl->reclaim_write_wq, &copy_job->work);
 }
 
-struct page_list * dm_zftl_construct_wb_page_list(struct copy_buffer * copy_buffer){
-    struct page_list * write_back_page_list = NULL;
-    struct page_list * curr = NULL;
+void dm_zftl_construct_wb_page_list(struct copy_buffer * copy_buffer){
+    struct page_list * curr = copy_buffer->wb_pa_list;
     unsigned int i = 0;
     char * vma_start = (char *)copy_buffer->buffer;
     unsigned int vma_idx;
     void * vma;
     for(i = 0; i < copy_buffer->nr_valid_blocks; ++i){
-
         vma_idx = copy_buffer->lpn_buffer[i].vma_idx;
         vma = (void *)(vma_start + BLOCK_4K_SIZE * vma_idx);
-        struct page * cp_page = vmalloc_to_page(vma);
-        struct page_list * cp_page_list = kvmalloc(sizeof(struct page_list), GFP_KERNEL);
-        cp_page_list->page = cp_page;
-        cp_page_list->next = NULL;
-
-        if(curr) {
-            curr->next = cp_page_list;
-            curr = cp_page_list;
-        }else{
-            curr = cp_page_list;
-            write_back_page_list = cp_page_list;
-        }
-
+        curr->page = vmalloc_to_page(vma);
+        curr = curr->next;
     }
-    return write_back_page_list;
 }
 
 void dm_zftl_valid_data_writeback(struct work_struct *work){
@@ -322,13 +340,12 @@ void dm_zftl_valid_data_writeback(struct work_struct *work){
     }
 
     copy_job->copy_buffer->nr_valid_blocks = next_valid_idx;
-
-    struct page_list * wb_pg_list = dm_zftl_construct_wb_page_list(copy_job->copy_buffer);
+    dm_zftl_construct_wb_page_list(copy_job->copy_buffer);
 
 
     struct zoned_dev * wb_dev = copy_job->writeback_to;
     sector_t nr_sectors = dmz_blk2sect(copy_job->copy_buffer->nr_valid_blocks);
-    struct dm_io_region * where = (struct dm_io_region *)vmalloc(sizeof (struct dm_io_region));
+    struct dm_io_region where;
     sector_t start_ppa = dm_zftl_get_seq_wp(wb_dev, nr_sectors);
     unsigned long flags;
     spin_lock_irqsave(&copy_job->writeback_to->zoned_metadata->opened_zoned->lock_, flags);
@@ -363,9 +380,9 @@ void dm_zftl_valid_data_writeback(struct work_struct *work){
             dev->zoned_metadata->opened_zoned->wp
     );
 #endif
-    where->sector = dm_zftl_get_dev_addr(dm_zftl, start_ppa);
-    where->bdev = wb_dev->bdev;
-    where->count = nr_sectors;
+    where.sector = dm_zftl_get_dev_addr(dm_zftl, start_ppa);
+    where.bdev = wb_dev->bdev;
+    where.count = nr_sectors;
 
     int ret;
     unsigned long error_bits;
@@ -374,12 +391,12 @@ void dm_zftl_valid_data_writeback(struct work_struct *work){
     iorq.bi_op = REQ_OP_WRITE;
     iorq.bi_op_flags = 0;
     iorq.mem.type = DM_IO_PAGE_LIST;
-    iorq.mem.ptr.pl = wb_pg_list;
+    iorq.mem.ptr.pl = copy_job->copy_buffer->wb_pa_list;
     iorq.mem.offset = 0;
     iorq.notify.fn = dm_zftl_valid_data_writeback_cb;
     iorq.notify.context = copy_job;
     iorq.client = dm_zftl->io_client;
-    ret = dm_io(&iorq, 1, where, error_bits);
+    ret = dm_io(&iorq, 1, &where, error_bits);
 
     struct zone_info * zone = &copy_job->copy_from->zoned_metadata->zones[copy_job->reclaim_zone_id];
     BUG_ON(!zone);
@@ -422,6 +439,8 @@ void dm_zftl_valid_data_writeback_cb(unsigned long error, void * context){
     dm_zftl_unpin(copy_job->pin_work_ctx);
 #endif
 
+    kvfree(copy_job->copy_buffer);
+    kvfree(copy_job);
 }
 
 unsigned int dm_zftl_get_victim_greedy(struct zoned_dev * dev, struct dm_zftl_mapping_table * mapping_table){

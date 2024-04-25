@@ -51,7 +51,7 @@
 #define GB 1024 * MB
 #define DM_ZFTL_ZNS_GC_ENABLE 0
 #define DM_ZFTL_PIN_DEBUG 0
-#define DM_ZFTL_USING_LEA_FTL 1
+#define DM_ZFTL_USING_LEA_FTL 0
 #define DM_ZFTL_USING_MIX 0
 #define DM_ZFTL_VMA_COPY_TEST 0
 #define DM_ZFTL_RECLAIM_ENABLE 1
@@ -123,7 +123,8 @@ struct dm_zftl_mapping_table{
     struct dm_zftl_l2p_mem_pool * l2p_cache;
     unsigned long p2l_check_bitmap;
 };
-
+struct page_list * dm_zftl_build_page_list(unsigned int nr);
+void dm_zftl_free_page_list(struct page_list * pg_list);
 unsigned int dm_zftl_l2p_get(struct dm_zftl_mapping_table * mapping_table, unsigned int lpn);
 int dm_zftl_lpn_is_in_cache(struct dm_zftl_mapping_table * mapping_table, sector_t lpn);
 void dm_zftl_lpn_set_dev(struct dm_zftl_mapping_table * mapping_table, unsigned int lpn, int dev);
@@ -151,6 +152,7 @@ enum {
 
 
 struct dm_zftl_io_work{
+    struct io_job *io_job;
     struct work_struct	work;
     struct bio * bio_ctx;
     struct dm_zftl_target * target;
@@ -165,6 +167,7 @@ struct dm_zftl_io_work{
 };
 struct copy_buffer {
     void * buffer;
+    struct page_list *wb_pa_list;
 
     struct dm_zftl_p2l_info * lpn_buffer;
     unsigned int * sorted_lpn_array;
@@ -342,6 +345,7 @@ int dm_zftl_ppn_is_valid(struct dm_zftl_mapping_table * mapping_table, sector_t 
 void dm_zftl_copy_read_cb(unsigned long error, void * context);
 int dm_zftl_update_mapping_cache(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, sector_t nr_blocks);
 void dm_zftl_iorq_dispatch(struct work_struct * work);
+void dm_zftl_construct_wb_page_list(struct copy_buffer * copy_buffer);
 struct copy_job {
     struct kfifo * fifo;
     struct copy_buffer * copy_buffer;

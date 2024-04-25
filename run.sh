@@ -2,7 +2,7 @@ mapper_path="/dev/mapper/"
 device="/dev/nvme0n1"
 cache_device="/dev/nvme1n1"
 target_device="ZFTL"
-echo deadline > /sys/block/nvme0n1/queue/scheduler
+#echo deadline > /sys/block/nvme0n1/queue/scheduler
 
 seq_write_test(){
   filename=${mapper_path}${target_device}

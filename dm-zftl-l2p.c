@@ -246,7 +246,7 @@ int dm_zftl_queue_l2p_pin_io(struct l2p_pin_work *pin_work_ctx){
 void dm_zftl_do_l2p_pin_io(struct work_struct * work){
     struct l2p_page_in_work * page_in_work = container_of(work, struct l2p_page_in_work, work);
     struct dm_zftl_l2p_mem_pool * l2p_cache = page_in_work->pin_work->dm_zftl->l2p_mem_pool;
-    struct dm_io_region *where = kvmalloc(sizeof(struct dm_io_region), GFP_NOIO);
+    struct dm_io_region * where = kvmalloc(sizeof(struct dm_io_region), GFP_NOIO);
     struct dm_io_request iorq;
     unsigned long flags;
     spin_lock_irqsave(&page_in_work->frame->_lock, flags);
@@ -506,7 +506,7 @@ void dm_zftl_lsm_tree_try_compact(struct dm_zftl_target * dm_zftl){
 #endif
 
         dm_zftl->last_compact_traffic_ = 0;
-        struct dm_zftl_compact_work * _work = kmalloc(sizeof(struct dm_zftl_compact_work), GFP_NOIO);
+        struct dm_zftl_compact_work * _work = kvmalloc(sizeof(struct dm_zftl_compact_work), GFP_KERNEL);
         _work->target = dm_zftl;
         INIT_WORK(&_work->work, dm_zftl_compact_work);
         queue_work(dm_zftl->lsm_tree_compact_wq, &_work->work);
@@ -521,6 +521,7 @@ void dm_zftl_compact_work(struct work_struct *work){
     lsm_tree_compact(dm_zftl->mapping_table->lsm_tree);
     lsm_tree_promote(dm_zftl->mapping_table->lsm_tree);
     mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
+    kvfree(_work);
 }
 
 //EXPORT_SYMBOL(dm_zftl_try_l2p_pin);
