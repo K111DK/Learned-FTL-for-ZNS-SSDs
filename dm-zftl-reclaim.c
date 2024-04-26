@@ -56,17 +56,16 @@ int dm_zftl_need_gc(struct dm_zftl_target * dm_zftl){
 }
 
 int dm_zftl_need_reclaim(struct dm_zftl_target * dm_zftl){
+    unsigned int nr_blocks = dm_zftl->cache_device->zone_nr_blocks;
     if(!DM_ZFTL_RECLAIM_ENABLE)
         return 0;
     if(atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_free_zone) <= DM_ZFTL_FOREGROUND_RECLAIM_IO_BLOCK_THESHOLD)
         return 0;
     if(atomic_read(&dm_zftl->nr_fg_reclaim) >= atomic_read(&dm_zftl->max_reclaim_read_work))
         return 0;
-    if(dm_zftl->last_write_traffic_ >= DM_ZFTL_RECLAIM_INTERVAL){
-        dm_zftl->last_write_traffic_ = 0;
-        return 1;
-    }
     if(atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_free_zone) <= DM_ZFTL_RECLAIM_THRESHOLD)
+        return 1;
+    if(atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_full_zone) * nr_blocks >= dmz_sect2blk(DM_ZFTL_FIFO_LOG_SIZE))
         return 1;
     return 0;
 }

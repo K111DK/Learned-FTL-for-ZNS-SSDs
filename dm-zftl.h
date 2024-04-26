@@ -49,6 +49,7 @@
 #define KB 2 /* in sectors */
 #define MB 1024 * KB
 #define GB 1024 * MB
+#define DM_ZFTL_FIFO_LOG_SIZE 10 * GB
 #define DM_ZFTL_ZNS_GC_ENABLE 0
 #define DM_ZFTL_PIN_DEBUG 0
 #define DM_ZFTL_USING_LEA_FTL 0
