@@ -57,9 +57,6 @@ struct lsm_tree * lsm_tree_init(unsigned int total_blocks){
     tree->frame = frame;
 
     unsigned int i;
-    for(i = 0; i < DM_ZFTL_LOOK_UP_HIST_LEN; ++i) {
-        tree->look_up_hist[i] = 0;
-    }
 
     for (i = 0; i < total_frame; ++i){
         frame[i].access_count = 0;
@@ -70,8 +67,14 @@ struct lsm_tree * lsm_tree_init(unsigned int total_blocks){
 #if DM_ZFTL_CONCURRENT_SUPPORT
         mutex_init(&frame[i]._lock);
 #endif
-
     }
+
+    for (i = 0; i < DM_ZFTL_LOOK_UP_HIST_LEN; ++i) {
+        atomic_set(&tree->look_up_hist[i], 0);
+    }
+    atomic_set(&tree->nr_total_query, 0);
+    atomic_set(&tree->nr_mispredict, 0);
+
     return tree;
 }
 
@@ -478,9 +481,10 @@ struct segment * lsm_tree_get_ppn_segment(struct lsm_tree * lsm_tree, unsigned i
 }
 
 unsigned int lsm_tree_get_ppn(struct lsm_tree * lsm_tree, unsigned int lpn){
-    unsigned int ppn, approximate_ppn;
+    unsigned int ppn = DM_ZFTL_UNMAPPED_PPA;
     struct segment * target_segment;
     unsigned int frame_no = lpn / DM_ZFTL_FRAME_LENGTH;
+    atomic_inc(&lsm_tree->nr_total_query);
     if(frame_no >= lsm_tree->nr_frame){
         goto UNMAPPED;
     }
@@ -497,9 +501,7 @@ unsigned int lsm_tree_get_ppn(struct lsm_tree * lsm_tree, unsigned int lpn){
 
             if(target_segment->is_seq_seg){
                 ppn = lsm_tree_cal_ppn_(target_segment, lpn);
-
-                //lsm_tree->look_up_hist[look_up] += 1;
-                return ppn;
+                break;
 
             }else {
                 /*Check if this lpn really in this approximate segment*/
@@ -508,23 +510,23 @@ unsigned int lsm_tree_get_ppn(struct lsm_tree * lsm_tree, unsigned int lpn){
 
                 /* This lpn doesn't in this seg, keep searching */
                 if(lpn_offset_in_seg != -1){
+                    if(!target_segment->is_acc_seg)
+                        atomic_inc(&lsm_tree->nr_mispredict);
                     /* Found in approximate seg */
-#if DM_ZFTL_LEA_ORIGIN
                     ppn = lsm_tree_cal_ppn_(target_segment, lpn);
-                    /* TODO: Search in p2l and do local search to find true ppn for lpn */
-#else
-                    ppn = lsm_tree_cal_ppn_(target_segment, lpn);
-#endif
-                    //lsm_tree->look_up_hist[look_up] += 1;
-                    return ppn;
+                    break;
                 }
             }
         }
 
         level = level->next_level;
     }
+
+    if(look_up < DM_ZFTL_LOOK_UP_HIST_LEN)
+        atomic_inc(&lsm_tree->look_up_hist[look_up]);
+
     UNMAPPED:
-    return DM_ZFTL_UNMAPPED_PPA;
+    return ppn;
 }
 
 int lsm_tree_CRB_search_lpn_(struct conflict_resolution_buffer * CRB,

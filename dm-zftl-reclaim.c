@@ -381,9 +381,9 @@ void dm_zftl_valid_data_writeback(struct work_struct *work){
     struct zoned_dev * wb_dev = copy_job->writeback_to;
     sector_t nr_sectors = dmz_blk2sect(copy_job->copy_buffer->nr_valid_blocks);
     struct dm_io_region where;
+    unsigned long flags;
     spin_lock_irqsave(&copy_job->dm_zftl->wp_lock_, flags);
     sector_t start_ppa = dm_zftl_get_seq_wp(wb_dev, nr_sectors);
-    unsigned long flags;
     copy_job->writeback_to->zoned_metadata->opened_zoned->wp += nr_sectors;
     spin_unlock_irqrestore(&copy_job->dm_zftl->wp_lock_, flags);
 

@@ -18,7 +18,7 @@
                                                     else                \
                                                         printk("Test %s pass: Expected:%u Got:%u\n", test_name, eq1, eq2);} while(0)
 #if DM_ZFTL_LEA_DEBUG
-#define DM_ZFTL_LOOK_UP_HIST_LEN 20
+#define DM_ZFTL_LOOK_UP_HIST_LEN 150
 
 
 enum {
@@ -132,7 +132,9 @@ struct lsm_tree_frame{
 };
 
 struct lsm_tree{
-    unsigned int look_up_hist[DM_ZFTL_LOOK_UP_HIST_LEN];
+    atomic_t nr_total_query;
+    atomic_t nr_mispredict;
+    atomic_t look_up_hist[DM_ZFTL_LOOK_UP_HIST_LEN];
     struct lsm_tree_frame * frame;
     unsigned int nr_frame;
 };

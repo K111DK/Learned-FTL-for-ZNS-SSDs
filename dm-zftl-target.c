@@ -1259,6 +1259,30 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
                p50_level);
     }
     DMEMIT("<=========================================>\n");
+    unsigned int total_query = atomic_read(&dm_zftl->mapping_table->lsm_tree->nr_total_query);
+    unsigned int total_mispredict = atomic_read(&dm_zftl->mapping_table->lsm_tree->nr_mispredict);
+    unsigned int z = 0;
+    unsigned int total_look_up = 0;
+    unsigned int max_look_up = 0;
+    for(z = 1 ; z < DM_ZFTL_LOOK_UP_HIST_LEN; ++z){
+        if(atomic_read(&dm_zftl->mapping_table->lsm_tree->look_up_hist[z]))
+            max_look_up = z;
+        total_look_up += (z) * atomic_read(&dm_zftl->mapping_table->lsm_tree->look_up_hist[z]);
+    }
+    DMEMIT("Total # of look up:%u,  # of mispredict:%u [%u%%] \n" , total_query
+                                                                        , total_mispredict
+                                                                        , total_mispredict * 100 / total_query);
+    DMEMIT("Look up dist:\n[1]:%u  [2]:%u  [3]:%u  [4]:%u  [5]:%u\n"
+            , atomic_read(&dm_zftl->mapping_table->lsm_tree->look_up_hist[1])
+            , atomic_read(&dm_zftl->mapping_table->lsm_tree->look_up_hist[2])
+            , atomic_read(&dm_zftl->mapping_table->lsm_tree->look_up_hist[3])
+            , atomic_read(&dm_zftl->mapping_table->lsm_tree->look_up_hist[4])
+            , atomic_read(&dm_zftl->mapping_table->lsm_tree->look_up_hist[5]));
+    DMEMIT("Look up cost: Avg:%u.%u%u Max:%u\n"  , total_look_up / total_query
+                                            , (total_look_up * 10 / total_query) % 10
+                                            , (total_look_up * 100 / total_query) % 10
+                                            , max_look_up);
+    DMEMIT("<=========================================>\n");
 #else
 
 #endif
@@ -1308,6 +1332,7 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
     DMEMIT("Total foreground Read Traffic: %llu MiB\n", dm_zftl->foreground_read_traffic_ * 4 / 1024);
     DMEMIT("Total Write Traffic: %llu MiB\n", dm_zftl->total_write_traffic_sec_ / (2 * 1024));
     //DMEMIT("Write amplify factor :%u", dmz_sect2blk(dm_zftl->total_write_traffic_sec_) / dm_zftl->foreground_write_traffic_);
+
     return;
 }
 
