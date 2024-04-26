@@ -11,7 +11,7 @@ unsigned int dm_zftl_sftl_get_size(struct dm_zftl_mapping_table * mapping_table)
     unsigned int i;
     unsigned int pre_frame = 0;
     for(i = 0; i < mapping_table->l2p_table_sz; ++i){
-        if(mapping_table->l2p_table[i] != DM_ZFTL_UNMAPPED_PPA){
+        if(mapping_table->l2p_table[i] != DM_ZFTL_UNMAPPED_PPA && (DM_ZFTL_USING_MIX && DM_ZFTL_USING_LEA_FTL && dm_zftl_lpn_is_in_cache(mapping_table, i))){
             vaild_lpn++;
             if(i / DM_ZFTL_SFTL_L2P_FRAME_LENGTH != pre_frame){
                 pre_frame = i / DM_ZFTL_SFTL_L2P_FRAME_LENGTH;
@@ -517,10 +517,13 @@ void dm_zftl_lsm_tree_try_compact(struct dm_zftl_target * dm_zftl){
 void dm_zftl_compact_work(struct work_struct *work){
     struct dm_zftl_compact_work * _work = container_of(work, struct dm_zftl_compact_work, work);
     struct dm_zftl_target * dm_zftl = _work->target;
-    mutex_lock(&dm_zftl->mapping_table->l2p_lock);
-    lsm_tree_compact(dm_zftl->mapping_table->lsm_tree);
-    lsm_tree_promote(dm_zftl->mapping_table->lsm_tree);
-    mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
+    unsigned int i;
+    for(i = 0; i < dm_zftl->mapping_table->lsm_tree->nr_frame ; ++i) {
+        mutex_lock(&dm_zftl->mapping_table->l2p_lock_array[i]);
+        lsm_tree_frame_compact__(&dm_zftl->mapping_table->lsm_tree->frame[i]);
+        lsm_tree_frame_promote__(&dm_zftl->mapping_table->lsm_tree->frame[i]);
+        mutex_unlock(&dm_zftl->mapping_table->l2p_lock_array[i]);
+    }
     kvfree(_work);
 }
 

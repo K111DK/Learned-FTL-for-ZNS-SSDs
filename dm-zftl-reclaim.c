@@ -89,23 +89,33 @@ void * dm_zftl_init_copy_buffer(struct dm_zftl_target * dm_zftl){
         buffer->nr_blocks = dm_zftl->zone_device->zone_nr_blocks;
         buffer->buffer = vmalloc(BLOCK_4K_SIZE * dm_zftl->zone_device->zone_nr_blocks);
         if(buffer->buffer == NULL){
-            vfree(buffer->buffer);
+            kvfree(buffer->buffer);
             printk(KERN_EMERG "Can't alloc copy buffer");
             BUG_ON(1);
         }
         buffer->lpn_buffer = kvmalloc_array(buffer->nr_blocks, sizeof(struct dm_zftl_p2l_info), GFP_KERNEL);
         if(buffer->lpn_buffer == NULL){
-            vfree(buffer->lpn_buffer);
+            kvfree(buffer->lpn_buffer);
             printk(KERN_EMERG "Can't alloc lpn buffer");
             BUG_ON(1);
         }
         buffer->nr_valid_blocks = 0;
         buffer->sorted_lpn_array = kvmalloc_array(buffer->nr_blocks, sizeof(unsigned int), GFP_KERNEL);
         if(buffer->sorted_lpn_array == NULL){
-            vfree(buffer->sorted_lpn_array);
+            kvfree(buffer->sorted_lpn_array);
             printk(KERN_EMERG "Can't alloc sorted lpn buffer");
             BUG_ON(1);
         }
+        buffer->lock_ptr_array = kvmalloc_array(dm_zftl->mapping_table->nr_l2p_lock_slice, sizeof(struct mutex *), GFP_KERNEL);
+        if(buffer->lock_ptr_array == NULL){
+            kvfree(buffer->lock_ptr_array);
+            printk(KERN_EMERG "Can't alloc sorted lock buffer");
+            BUG_ON(1);
+        }
+        unsigned int j;
+        for(j = 0; j < dm_zftl->mapping_table->nr_l2p_lock_slice; ++j)
+            buffer->lock_ptr_array[j] = NULL;
+
         ret = kfifo_in(&dm_zftl->fg_reclaim_buffer_fifo, buffer, sizeof(struct copy_buffer));
     }
 
@@ -115,22 +125,32 @@ void * dm_zftl_init_copy_buffer(struct dm_zftl_target * dm_zftl){
         buffer->nr_blocks = dm_zftl->zone_device->zone_nr_blocks;
         buffer->buffer = vmalloc(BLOCK_4K_SIZE * dm_zftl->zone_device->zone_nr_blocks);
         if(buffer->buffer == NULL){
-            vfree(buffer->buffer);
+            kvfree(buffer->buffer);
             printk(KERN_EMERG "Can't alloc copy buffer");
             BUG_ON(1);
         }
         buffer->lpn_buffer = kvmalloc_array(buffer->nr_blocks, sizeof(struct dm_zftl_p2l_info), GFP_KERNEL);
         if(buffer->lpn_buffer == NULL){
-            vfree(buffer->lpn_buffer);
+            kvfree(buffer->lpn_buffer);
             printk(KERN_EMERG "Can't alloc lpn buffer");
             BUG_ON(1);
         }
         buffer->sorted_lpn_array = kvmalloc_array(buffer->nr_blocks, sizeof(unsigned int), GFP_KERNEL);
         if(buffer->sorted_lpn_array == NULL){
-            vfree(buffer->sorted_lpn_array);
+            kvfree(buffer->sorted_lpn_array);
             printk(KERN_EMERG "Can't alloc sorted lpn buffer");
             BUG_ON(1);
         }
+        buffer->lock_ptr_array = kvmalloc_array(dm_zftl->mapping_table->nr_l2p_lock_slice, sizeof(struct mutex *), GFP_KERNEL);
+        if(buffer->lock_ptr_array == NULL){
+            kvfree(buffer->lock_ptr_array);
+            printk(KERN_EMERG "Can't alloc sorted lock buffer");
+            BUG_ON(1);
+        }
+        unsigned int j;
+        for(j = 0; j < dm_zftl->mapping_table->nr_l2p_lock_slice; ++j)
+            buffer->lock_ptr_array[j] = NULL;
+
         ret = kfifo_in(&dm_zftl->bg_reclaim_buffer_fifo, buffer, sizeof(struct copy_buffer));
     }
     return 0;
@@ -323,10 +343,26 @@ void dm_zftl_valid_data_writeback(struct work_struct *work){
     unsigned int pre_lpn = 0;
     unsigned int lpn = 0;
 
-    mutex_lock(&dm_zftl->mapping_table->l2p_lock);
+    copy_job->copy_buffer->tail_lock_idx = 0;
     for(i = 0; i < copy_job->nr_blocks; ++i){
         ppn = copy_job->copy_buffer->lpn_buffer[i].ppn;
         lpn = copy_job->copy_buffer->lpn_buffer[i].lpn;
+
+        if(lpn != DM_ZFTL_UNMAPPED_LPA){
+            struct mutex * frame_lock = copy_job->copy_buffer->lock_ptr_array[copy_job->copy_buffer->tail_lock_idx];
+            struct mutex * current_lock_frame = &dm_zftl->mapping_table->l2p_lock_array[lpn / DM_ZFTL_LOCK_GRAN];
+            int need_lock = 0;
+            if(frame_lock == NULL){
+                copy_job->copy_buffer->lock_ptr_array[copy_job->copy_buffer->tail_lock_idx] = current_lock_frame;
+                mutex_lock(current_lock_frame);
+            }else{
+                if(frame_lock != current_lock_frame){
+                    copy_job->copy_buffer->tail_lock_idx++;
+                    copy_job->copy_buffer->lock_ptr_array[copy_job->copy_buffer->tail_lock_idx] = current_lock_frame;
+                    mutex_lock(current_lock_frame);
+                }
+            }
+        }
 
         BUG_ON(lpn < pre_lpn);
         pre_lpn = lpn;
@@ -347,9 +383,9 @@ void dm_zftl_valid_data_writeback(struct work_struct *work){
     struct dm_io_region where;
     sector_t start_ppa = dm_zftl_get_seq_wp(wb_dev, nr_sectors);
     unsigned long flags;
-    spin_lock_irqsave(&copy_job->writeback_to->zoned_metadata->opened_zoned->lock_, flags);
+    spin_lock_irqsave(&copy_job->dm_zftl->wp_lock_, flags);
     copy_job->writeback_to->zoned_metadata->opened_zoned->wp += nr_sectors;
-    spin_unlock_irqrestore(&copy_job->writeback_to->zoned_metadata->opened_zoned->lock_, flags);
+    spin_unlock_irqrestore(&copy_job->dm_zftl->wp_lock_, flags);
 
 
 
@@ -357,7 +393,11 @@ void dm_zftl_valid_data_writeback(struct work_struct *work){
                                         copy_job->copy_buffer->sorted_lpn_array,
                                         dmz_sect2blk(start_ppa),
                                         copy_job->copy_buffer->nr_valid_blocks);
-    mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
+
+    for(i = 0 ; i <= copy_job->copy_buffer->tail_lock_idx; ++i){
+        mutex_unlock(copy_job->copy_buffer->lock_ptr_array[i]);
+    }
+
 
 
     /* We can only have one outstanding write at a time */

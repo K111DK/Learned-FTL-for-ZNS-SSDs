@@ -60,7 +60,7 @@
 #define DM_ZFTL_RECLAIM_INTERVAL 2 * GB
 #define DM_ZFTL_RECLAIM_DEBUG 0
 #define DM_ZFTL_RECLAIM_MAX_READ_NUM_DEFAULT 1
-
+#define DM_ZFTL_LOCK_GRAN 256
 #define DM_ZFTL_DEV_STR(dev) dm_zftl_is_cache(dev) ? "Cache" : "ZNS"
 #define DM_ZFTL_RECLAIM_PERIOD	(1 * HZ)
 #define DM_ZFTL_FULL_THRESHOLD 0
@@ -121,6 +121,11 @@ struct dm_zftl_mapping_table{
     uint8_t * device_bitmap; // 0-> cache 1-> backedend 1B -> 4*8 = 32KB: 32MB/TB
     uint8_t * validate_bitmap;
     struct mutex l2p_lock;
+
+    struct mutex * l2p_lock_array;
+    unsigned int nr_l2p_lock_slice;
+
+
     struct dm_zftl_l2p_mem_pool * l2p_cache;
     unsigned long p2l_check_bitmap;
 };
@@ -169,6 +174,10 @@ struct dm_zftl_io_work{
 struct copy_buffer {
     void * buffer;
     struct page_list *wb_pa_list;
+
+
+    struct mutex ** lock_ptr_array;
+    unsigned int tail_lock_idx;
 
     struct dm_zftl_p2l_info * lpn_buffer;
     unsigned int * sorted_lpn_array;
@@ -233,6 +242,8 @@ struct dm_zftl_target {
     void * dummy_l2p_buffer;
 
     spinlock_t record_lock_;
+    spinlock_t wp_lock_;
+
 
     unsigned long long fg_reclaim_cnt;
     unsigned long long bg_reclaim_cnt;

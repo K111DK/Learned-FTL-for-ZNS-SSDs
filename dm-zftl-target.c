@@ -28,7 +28,18 @@ int dm_zftl_init_mapping_table(struct dm_zftl_target * dm_zftl){
     dm_zftl->mapping_table->validate_bitmap = kvmalloc_array( (dm_zftl->mapping_table->l2p_table_sz) / 8 + 1 ,
                                                               sizeof(uint8_t), GFP_KERNEL | __GFP_ZERO);
     dm_zftl->mapping_table->lsm_tree = lsm_tree_init(dm_zftl->mapping_table->l2p_table_sz);
-    unsigned int ppn, lpn, i;
+
+    unsigned int nr_lock_slice = (dm_zftl->mapping_table->l2p_table_sz) / DM_ZFTL_LOCK_GRAN + 1;
+    dm_zftl->mapping_table->l2p_lock_array = kvmalloc_array(  nr_lock_slice,
+                                                                sizeof(struct  mutex), GFP_KERNEL);
+    dm_zftl->mapping_table->nr_l2p_lock_slice = nr_lock_slice;
+    unsigned int i;
+    for(i = 0; i < nr_lock_slice; ++i){
+        mutex_init(&dm_zftl->mapping_table->l2p_lock_array[i]);
+    }
+
+
+    unsigned int ppn, lpn;
     for(ppn = 0; ppn < dm_zftl->mapping_table->l2p_table_sz; ppn++){
         lpn = ppn;
         dm_zftl->mapping_table->l2p_table[lpn] = DM_ZFTL_UNMAPPED_PPA;
@@ -102,7 +113,13 @@ int dm_zftl_update_mapping_by_lpn_array(struct dm_zftl_mapping_table * mapping_t
 }
 
 int dm_zftl_update_mapping_cache(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, sector_t nr_blocks){
-    mutex_lock(&mapping_table->l2p_lock);
+    unsigned int i;
+    unsigned int lpn = dmz_sect2blk(lba);
+    unsigned int start_lock_frame = lpn / DM_ZFTL_LOCK_GRAN;
+    unsigned int end_lock_frame = (lpn + nr_blocks) / DM_ZFTL_LOCK_GRAN;
+    for(i = start_lock_frame; i <= end_lock_frame; ++i ){
+        mutex_lock(&mapping_table->l2p_lock_array[i]);
+    }
 
 #if DM_ZFTL_USING_LEA_FTL
 
@@ -112,7 +129,7 @@ int dm_zftl_update_mapping_cache(struct dm_zftl_mapping_table * mapping_table, s
 
 #endif
 
-    int i;
+
     for(i = 0; i < nr_blocks; ++i){
         dm_zftl_lpn_set_dev(mapping_table, dmz_sect2blk(lba) + i, DM_ZFTL_CACHE);
         dm_zftl_set(mapping_table, lba + (sector_t)i * dmz_blk2sect(1) , ppa + (sector_t)i * dmz_blk2sect(1));
@@ -127,7 +144,9 @@ int dm_zftl_update_mapping_cache(struct dm_zftl_mapping_table * mapping_table, s
 #endif
 
 
-    mutex_unlock(&mapping_table->l2p_lock);
+    for(i = start_lock_frame; i <= end_lock_frame; ++i ){
+        mutex_unlock(&mapping_table->l2p_lock_array[i]);
+    }
 
     struct dm_zftl_target * dm_zftl = mapping_table->dm_zftl;
 
@@ -336,7 +355,8 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
 
     spin_lock_init(&read_io->lock_);
 
-    mutex_lock(&dm_zftl->mapping_table->l2p_lock);
+    unsigned int lock_frame = lpn / DM_ZFTL_LOCK_GRAN;
+    mutex_lock(&dm_zftl->mapping_table->l2p_lock_array[lock_frame]);
     ppa = dm_zftl_get(dm_zftl->mapping_table, start_sec);
     cal_ppn = dmz_sect2blk(ppa);
     ppn = cal_ppn;
@@ -361,7 +381,7 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
         //BUG_ON(1);
     }
     read_io->ppn = ppn;//True ppn
-    mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
+    mutex_unlock(&dm_zftl->mapping_table->l2p_lock_array[lock_frame]);
 
 
     dev = dm_zftl_get_ppa_dev(dm_zftl, dmz_blk2sect(cal_ppn));
@@ -467,8 +487,8 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
 
     sector_t start_sec = bio->bi_iter.bi_sector;
     sector_t ppa;
-
-    mutex_lock(&dm_zftl->mapping_table->l2p_lock);
+    unsigned long flags;
+    spin_lock_irqsave(&dm_zftl->wp_lock_, flags);
     sector_t start_ppa = dm_zftl_get_seq_wp(dev, bio_sectors(bio));
 
     if(start_ppa == DM_ZFTL_UNMAPPED_PPA){
@@ -478,12 +498,12 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
                     ,atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_free_zone)
                     ,atomic_read(&dm_zftl->nr_fg_reclaim)
                     ,atomic_read(&dm_zftl->nr_bg_reclaim));
-        mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
+        spin_unlock_irqrestore(&dm_zftl->wp_lock_, flags);
         goto FINISH;
     }
 
     dev->zoned_metadata->opened_zoned->wp += dmz_blk2sect(dmz_bio_blocks(bio));
-    mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
+    spin_unlock_irqrestore(&dm_zftl->wp_lock_, flags);
 
     sector_t desire, addr1, addr2;
     desire = bio->bi_iter.bi_sector;
@@ -1091,6 +1111,7 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     //mod_delayed_work(dmz->reclaim_read_wq, &dmz->reclaim_work->work, DM_ZFTL_RECLAIM_PERIOD);
 
     spin_lock_init(&dmz->record_lock_);
+    spin_lock_init(&dmz->wp_lock_);
     dmz->cache_2_zns_reclaim_write_traffic_ = 0;
     dmz->cache_2_zns_reclaim_read_traffic_ = 0;
     dmz->zns_write_traffic_ = 0;
@@ -1273,6 +1294,15 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
     DMEMIT("Total pinned frame: %u\n", pinned_frame_cnt);
     DMEMIT("Total unpinned frame: %u\n", unpinned_frame_cnt);
     DMEMIT("Total on lru frame: %u\n", on_lru_frame_cnt);
+    DMEMIT("<=========================================>\n");
+    DMEMIT("Cache device : Full zone: %d / %u Used space: %u MiB/ %u MiB\n", atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_full_zone)
+                                                                      , dm_zftl->cache_device->nr_zones
+                                                                      , atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_full_zone) * dm_zftl->cache_device->zone_nr_blocks * 4 / 1024
+                                                                      , dm_zftl->cache_device->nr_zones * dm_zftl->cache_device->zone_nr_blocks * 4 / 1024);
+    DMEMIT("Zone device : Full zone: %d / %u Used space: %u MiB/ %u MiB\n", atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_full_zone)
+            , dm_zftl->zone_device->nr_zones
+            , atomic_read(&dm_zftl->zone_device->zoned_metadata->nr_full_zone) * dm_zftl->zone_device->zone_nr_blocks * 4 / 1024
+            , dm_zftl->zone_device->nr_zones * dm_zftl->zone_device->zone_nr_blocks * 4 / 1024);
     DMEMIT("<=========================================>\n");
     DMEMIT("Total foreground Write Traffic: %llu MiB\n", dm_zftl->foreground_write_traffic_ * 4 / 1024);
     DMEMIT("Total foreground Read Traffic: %llu MiB\n", dm_zftl->foreground_read_traffic_ * 4 / 1024);

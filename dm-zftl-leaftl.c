@@ -784,8 +784,9 @@ void dm_zftl_bitmap_set(struct frame_valid_bitmap *bm, unsigned int idx, int val
 
 void lsm_tree_compact(struct lsm_tree * lsm_tree){
     int i = 0;
-    for(i = 0; i < lsm_tree->nr_frame ; ++i)
+    for(i = 0; i < lsm_tree->nr_frame ; ++i) {
         lsm_tree_frame_compact__(&lsm_tree->frame[i]);
+    }
 }
 
 
