@@ -521,7 +521,9 @@ void dm_zftl_compact_work(struct work_struct *work){
     for(i = 0; i < dm_zftl->mapping_table->lsm_tree->nr_frame ; ++i) {
         mutex_lock(&dm_zftl->mapping_table->l2p_lock_array[i]);
         lsm_tree_frame_compact__(&dm_zftl->mapping_table->lsm_tree->frame[i]);
+#if DM_ZFTL_COMPACT_WITH_PROMOTE
         lsm_tree_frame_promote__(&dm_zftl->mapping_table->lsm_tree->frame[i]);
+#endif
         mutex_unlock(&dm_zftl->mapping_table->l2p_lock_array[i]);
     }
     kvfree(_work);
