@@ -327,98 +327,155 @@ static inline void dm_zftl_init_bioctx(struct dm_zftl_target *dm_zftl,
 int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
     //
     struct zoned_dev * dev;
-
+    struct dm_zftl_io_work *io_work = dm_per_bio_data(bio, sizeof(struct dm_zftl_io_work));
     unsigned long flags;
     unsigned int nr_blocks = dmz_bio_blocks(bio);
+    atomic_set(&io_work->io_in_wait, nr_blocks);
     struct dm_io_region where;
 
-    if(nr_blocks > 1){
-        printk(KERN_EMERG "Error got read bio > 1 blk");
-        BUG_ON(1);
-    }
-
-    int i, ret;
+    unsigned int i;
     unsigned int do_correct_extra_read = 0;
     sector_t start_sec = bio->bi_iter.bi_sector;
     sector_t ppa;
     unsigned int cal_ppn;
-    unsigned int lpn = dmz_sect2blk(start_sec);
     unsigned int ppn;
 
-    struct dm_zftl_read_io * read_io = (struct dm_zftl_read_io *)kvmalloc(sizeof( struct dm_zftl_read_io), GFP_KERNEL);
-    read_io->bio = bio;
-    read_io->nr_io = 1;
-    read_io->complete_io = 0;
-    read_io->dm_zftl = dm_zftl;
-    read_io->lpn = lpn;
+//    struct dm_zftl_read_io * read_io = (struct dm_zftl_read_io *)kvmalloc(sizeof( struct dm_zftl_read_io), GFP_KERNEL);
+//    read_io->bio = bio;
+//    read_io->nr_io = nr_blocks;
+//    read_io->complete_io = 0;
+//    read_io->dm_zftl = dm_zftl;
+//    read_io->lpn = lpn;
+//    spin_lock_init(&read_io->lock_);
+
+    unsigned int lock_frame;
+    unsigned int lpn;
+    for(i = 0 ; i < nr_blocks; ++i){
 
 
-    spin_lock_init(&read_io->lock_);
+        struct bio *clone;
+        clone = bio_clone_fast(bio, GFP_NOIO, &dm_zftl->bio_set);
+        if (!clone){
+            printk(KERN_EMERG "[READ] err no mem to clone read bio");
+            BUG_ON(1);
+        }
 
-    unsigned int lock_frame = lpn / DM_ZFTL_LOCK_GRAN;
-    mutex_lock(&dm_zftl->mapping_table->l2p_lock_array[lock_frame]);
-    ppa = dm_zftl_get(dm_zftl->mapping_table, start_sec);
-    cal_ppn = dmz_sect2blk(ppa);
-    ppn = cal_ppn;
+        lpn = dmz_sect2blk(start_sec) + i;
+        lock_frame = lpn / DM_ZFTL_LOCK_GRAN;
+        mutex_lock(&dm_zftl->mapping_table->l2p_lock_array[lock_frame]);
 
 
+        ppa = dm_zftl_get(dm_zftl->mapping_table, start_sec + i * dmz_blk2sect(1));
+        cal_ppn = dmz_sect2blk(ppa);
+        ppn = cal_ppn;
 #if DM_ZFTL_USING_MIX || DM_ZFTL_USING_LEA_FTL
-    if(cal_ppn != DM_ZFTL_UNMAPPED_PPA){
-        if(dm_zftl->mapping_table->p2l_table[cal_ppn] != lpn){
+        if(unlikely(cal_ppn != DM_ZFTL_UNMAPPED_PPA)){
+        if(unlikely(dm_zftl->mapping_table->p2l_table[cal_ppn] != lpn)){
             do_correct_extra_read = 1;
             ppn = lsm_tree_predict_correct(dm_zftl->mapping_table->p2l_table, lpn, cal_ppn);
         }
     }
 #endif
-    if(ppn != dm_zftl->mapping_table->l2p_table[lpn]) {
-        printk(KERN_EMERG
-        "[Get] lpn:%llu predict err! => dev:%s cal:%llu got:%llu wanted:%llu"
-                ,lpn
-                ,dm_zftl_lpn_is_in_cache(dm_zftl->mapping_table, lpn) ? "Cache":"ZNS"
-                ,cal_ppn
-                ,ppn
-                ,dm_zftl->mapping_table->l2p_table[lpn]);
-        //BUG_ON(1);
+        if(unlikely(ppn != dm_zftl->mapping_table->l2p_table[lpn])) {
+            printk(KERN_EMERG
+            "[Get] lpn:%llu predict err! => dev:%s cal:%llu got:%llu wanted:%llu"
+                    ,lpn
+                    ,dm_zftl_lpn_is_in_cache(dm_zftl->mapping_table, lpn) ? "Cache":"ZNS"
+                    ,cal_ppn
+                    ,ppn
+                    ,dm_zftl->mapping_table->l2p_table[lpn]);
+            //BUG_ON(1);
+        }
+        //read_io->ppn = ppn;//True ppn
+        mutex_unlock(&dm_zftl->mapping_table->l2p_lock_array[lock_frame]);
+
+
+        dev = dm_zftl_get_ppa_dev(dm_zftl, dmz_blk2sect(ppn));
+        where.bdev = dev->bdev;
+        where.sector = dm_zftl_get_dev_addr(dm_zftl, dmz_blk2sect(ppn));
+        where.count = dmz_blk2sect(1);
+        bio_set_dev(clone, dev->bdev);
+        clone->bi_iter.bi_sector = dmz_blk2sect(lpn);
+        clone->bi_iter.bi_size = dmz_blk2sect(1) << SECTOR_SHIFT;
+        clone->bi_end_io = dm_zftl_read_clone_endio;
+        clone->bi_private = bio;
+        submit_bio_noacct(clone);
+        bio_advance(bio, dmz_blk2sect(1));
     }
-    read_io->ppn = ppn;//True ppn
-    mutex_unlock(&dm_zftl->mapping_table->l2p_lock_array[lock_frame]);
-
-
-    dev = dm_zftl_get_ppa_dev(dm_zftl, dmz_blk2sect(cal_ppn));
-    where.bdev = dev->bdev;
-    where.sector = dm_zftl_get_dev_addr(dm_zftl, dmz_blk2sect(cal_ppn));
-    where.count = dmz_blk2sect(1);
-
-    if(do_correct_extra_read){
-
-            BUG_ON(cal_ppn == ppn);
-            struct dm_io_request iorq;
-            iorq.bi_op = REQ_OP_READ;
-            iorq.bi_op_flags = 0;
-            iorq.mem.type = DM_IO_VMA;//read oob data to correct
-            iorq.mem.ptr.vma = dm_zftl->dummy_l2p_buffer;
-            iorq.notify.fn = dm_zftl_correct_predict_ppn;
-            iorq.notify.context = read_io;
-            iorq.client = dm_zftl->io_client;
-            dm_io(&iorq, 1, &where, NULL);
-
-    }else{
+//    spin_lock_init(&read_io->lock_);
+//
+//    unsigned int lock_frame = lpn / DM_ZFTL_LOCK_GRAN;
+//    mutex_lock(&dm_zftl->mapping_table->l2p_lock_array[lock_frame]);
+//    ppa = dm_zftl_get(dm_zftl->mapping_table, start_sec);
+//    cal_ppn = dmz_sect2blk(ppa);
+//    ppn = cal_ppn;
+//#if DM_ZFTL_USING_MIX || DM_ZFTL_USING_LEA_FTL
+//    if(cal_ppn != DM_ZFTL_UNMAPPED_PPA){
+//        if(dm_zftl->mapping_table->p2l_table[cal_ppn] != lpn){
+//            do_correct_extra_read = 1;
+//            ppn = lsm_tree_predict_correct(dm_zftl->mapping_table->p2l_table, lpn, cal_ppn);
+//        }
+//    }
+//#endif
+//    if(ppn != dm_zftl->mapping_table->l2p_table[lpn]) {
+//        printk(KERN_EMERG
+//        "[Get] lpn:%llu predict err! => dev:%s cal:%llu got:%llu wanted:%llu"
+//                ,lpn
+//                ,dm_zftl_lpn_is_in_cache(dm_zftl->mapping_table, lpn) ? "Cache":"ZNS"
+//                ,cal_ppn
+//                ,ppn
+//                ,dm_zftl->mapping_table->l2p_table[lpn]);
+//        //BUG_ON(1);
+//    }
+//    read_io->ppn = ppn;//True ppn
+//    mutex_unlock(&dm_zftl->mapping_table->l2p_lock_array[lock_frame]);
+//
+//
+//    dev = dm_zftl_get_ppa_dev(dm_zftl, dmz_blk2sect(cal_ppn));
+//    where.bdev = dev->bdev;
+//    where.sector = dm_zftl_get_dev_addr(dm_zftl, dmz_blk2sect(cal_ppn));
+//    where.count = dmz_blk2sect(1);
+//
+//    if(do_correct_extra_read){
+//
+//            BUG_ON(cal_ppn == ppn);
+//            struct dm_io_request iorq;
+//            iorq.bi_op = REQ_OP_READ;
+//            iorq.bi_op_flags = 0;
+//            iorq.mem.type = DM_IO_VMA;//read oob data to correct
+//            iorq.mem.ptr.vma = dm_zftl->dummy_l2p_buffer;
+//            iorq.notify.fn = dm_zftl_correct_predict_ppn;
+//            iorq.notify.context = read_io;
+//            iorq.client = dm_zftl->io_client;
+//            dm_io(&iorq, 1, &where, NULL);
+//
+//    }else{
 //
 //            BUG_ON(cal_ppn != ppn);
-            struct dm_io_request iorq;
-            iorq.bi_op = REQ_OP_READ;
-            iorq.bi_op_flags = 0;
-            iorq.mem.type = DM_IO_BIO;
-            iorq.mem.ptr.bio = bio;
-            iorq.notify.fn = dm_zftl_dm_io_read_cb;
-            iorq.notify.context = read_io;
-            iorq.client = dm_zftl->io_client;
-            dm_io(&iorq, 1, &where, NULL);
-
-    }
-
+//            struct dm_io_request iorq;
+//            iorq.bi_op = REQ_OP_READ;
+//            iorq.bi_op_flags = 0;
+//            iorq.mem.type = DM_IO_BIO;
+//            iorq.mem.ptr.bio = bio;
+//            iorq.notify.fn = dm_zftl_dm_io_read_cb;
+//            iorq.notify.context = read_io;
+//            iorq.client = dm_zftl->io_client;
+//            dm_io(&iorq, 1, &where, NULL);
+//
+//    }
+//
     return DM_MAPIO_SUBMITTED;
 }
+void dm_zftl_read_clone_endio(struct bio *clone)
+{
+    struct bio *bio = clone->bi_private;
+    struct dm_zftl_io_work *io_work = dm_per_bio_data(bio, sizeof(struct dm_zftl_io_work));
+    bio_put(clone);
+    if(atomic_dec_and_test(&io_work->io_in_wait)){
+        bio_endio(bio);
+    }
+}
+
 void dm_zftl_correct_predict_ppn(unsigned long error, void * context){
     struct iorq_dispatch_work * iorq_work = kvmalloc(sizeof(struct iorq_dispatch_work), GFP_KERNEL);
     struct dm_zftl_read_io * read_io =(struct dm_zftl_read_io *) context;
@@ -736,15 +793,15 @@ static int dm_zftl_map(struct dm_target *ti, struct bio *bio)
         return DM_MAPIO_KILL;
     }
 
-    /* Split read io to 1 block [IMPORTANT] */
-    if( nr_blocks > 1 && bio_op(bio) == REQ_OP_READ ){
-        dm_accept_partial_bio(bio, dmz_blk2sect(1));
-    }
-
-    if(dmz_bio_blocks(bio) > 1 && bio_op(bio) == REQ_OP_READ){
-        printk(KERN_EMERG "[MAP]:Error got read bio > 1 blk");
-        BUG_ON(1);
-    }
+//    /* Split read io to 1 block [IMPORTANT] */
+//    if( nr_blocks > 1 && bio_op(bio) == REQ_OP_READ ){
+//        dm_accept_partial_bio(bio, dmz_blk2sect(1));
+//    }
+//
+//    if(dmz_bio_blocks(bio) > 1 && bio_op(bio) == REQ_OP_READ){
+//        printk(KERN_EMERG "[MAP]:Error got read bio > 1 blk");
+//        BUG_ON(1);
+//    }
 
 
     /* Initialize the BIO context */
@@ -1105,6 +1162,11 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
         goto err_dev;
     }
 
+    if (bioset_init(&dmz->bio_set, DM_ZFTL_MIN_READ_BIOS, 0, 0)) {
+        ti->error = "Create bio set failed";
+        goto err_dev;
+    }
+
     //dmz->reclaim_work = vmalloc(sizeof(struct dm_zftl_reclaim_read_work));
     //dmz->reclaim_work->target = dmz;
     //INIT_DELAYED_WORK(&dmz->reclaim_work->work, dm_zftl_reclaim_read_work);
@@ -1174,6 +1236,7 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
 
     //lsm_tree_frame_status_check(dm_zftl->mapping_table->lsm_tree, type, status_flags, result, maxlen);
     int level_sum = 0;
+    int not_empty_level_sum = 0;
     int acc_count = 0;
     int appro_count = 0;
     int crb_count = 0;
@@ -1210,6 +1273,7 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
             continue;
 
         level_sum += atomic_read(&frame->nr_level);
+        not_empty_level_sum += 1;
         while(level) {
             struct segment * segs = level->seg;
             while(segs) {
@@ -1240,7 +1304,10 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
     unsigned int p50_level;
     unsigned int p99_level;
     unsigned int max_level;
-    DMEMIT("Avg level: %u / %u \n", level_sum, tree->nr_frame);
+    DMEMIT("Avg level: %d.%d%d [%d / %d] \n"    , level_sum / not_empty_level_sum
+                                                , (level_sum * 10 / not_empty_level_sum) % 10
+                                                , (level_sum * 100 / not_empty_level_sum) % 100
+                                                , level_sum, not_empty_level_sum);
     if(dm_zftl->record_buffer){
         // ascend
         sort(dm_zftl->record_buffer,
@@ -1283,10 +1350,11 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
                                             , (total_look_up * 100 / total_query) % 10
                                             , max_look_up);
     DMEMIT("<=========================================>\n");
-#else
-
 #endif
-    DMEMIT("Mapping table dftl/sftl size:%u B\n", dm_zftl_sftl_get_size(dm_zftl->mapping_table));
+    DMEMIT("Mapping table sftl size:%u B\n", dm_zftl_sftl_get_size(dm_zftl->mapping_table));
+    DMEMIT("Mapping table dftl size:%u B\n", dm_zftl_dftl_get_size(dm_zftl->mapping_table));
+#if DM_ZFTL_L2P_PIN
+    DMEMIT("<=========================================>\n");
     struct dm_zftl_l2p_mem_pool * l2p_cache = dm_zftl->l2p_mem_pool;
     unsigned int i = 0;
     unsigned int pinned_frame_cnt = 0;
@@ -1295,7 +1363,6 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
     unsigned int on_lru_frame_cnt = 0;
     unsigned int current_eta_l2p_size = 0;
     struct dm_zftl_l2p_frame * frame;
-
     unsigned long flags;
     for(i = 0; i < l2p_cache->max_frame; ++i){
         frame = l2p_cache->l2f_table[i];
@@ -1318,6 +1385,7 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
     DMEMIT("Total pinned frame: %u\n", pinned_frame_cnt);
     DMEMIT("Total unpinned frame: %u\n", unpinned_frame_cnt);
     DMEMIT("Total on lru frame: %u\n", on_lru_frame_cnt);
+#endif
     DMEMIT("<=========================================>\n");
     DMEMIT("Cache device : Full zone: %d / %u Used space: %u MiB/ %u MiB\n", atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_full_zone)
                                                                       , dm_zftl->cache_device->nr_zones

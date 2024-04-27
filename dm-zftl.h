@@ -38,7 +38,7 @@
 #include <linux/kfifo.h>
 #include <linux/kernel.h>
 #include <linux/gcd.h>
-
+#include <linux/compiler.h>
 
 #define DM_ZFTL_L2P_PIN (0)
 #define DM_ZFTL_COMPACT_ENABLE 1
@@ -49,7 +49,7 @@
 #define KB 2 /* in sectors */
 #define MB 1024 * KB
 #define GB 1024 * MB
-#define DM_ZFTL_FIFO_LOG_SIZE 10 * GB
+#define DM_ZFTL_FIFO_LOG_SIZE 40 * GB
 #define DM_ZFTL_ZNS_GC_ENABLE 0
 #define DM_ZFTL_PIN_DEBUG 0
 #define DM_ZFTL_USING_LEA_FTL 1
@@ -72,6 +72,7 @@
 #define DM_ZFTL_DEBUG 0
 #define DM_ZFTL_MIN_BIOS 8192
 #define BDEVNAME_SIZE 256
+#define DM_ZFTL_MIN_READ_BIOS 8192
 /*
  * Creates block devices with 4KB blocks, always.
  * copy from dm-zoned
@@ -139,6 +140,7 @@ void dm_zftl_lpn_set_dev(struct dm_zftl_mapping_table * mapping_table, unsigned 
 //int dm_zftl_set(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa);
 //int dm_zftl_update_mapping(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, unsigned int nr_blocks);
 void dm_zftl_correct_predict_ppn(unsigned long error, void * context);
+void dm_zftl_read_clone_endio(struct bio *clone);
 struct dm_zftl_read_io {
     struct dm_zftl_target * dm_zftl;
     struct bio * bio;
@@ -158,6 +160,10 @@ enum {
 
 
 struct dm_zftl_io_work{
+
+    /* For cloned BIOs to read bio*/
+    struct bio_set		bio_set;
+
     struct io_job *io_job;
     struct work_struct	work;
     struct bio * bio_ctx;
@@ -165,6 +171,7 @@ struct dm_zftl_io_work{
     struct l2p_pin_work * pin_work_ctx;
     refcount_t		ref;
     sector_t		user_sec;
+    atomic_t        io_in_wait;
     int io_complete;
     spinlock_t lock_;
 
@@ -559,6 +566,7 @@ void dm_zftl_validate_ppn(struct dm_zftl_mapping_table * mapping_table, sector_t
 void dm_zftl_l2p_evict_cb(unsigned long error, void * context);
 void dm_zftl_do_evict(struct work_struct *work);
 unsigned int dm_zftl_sftl_get_size(struct dm_zftl_mapping_table * mapping_table);
+unsigned int dm_zftl_dftl_get_size(struct dm_zftl_mapping_table * mapping_table);
 void dm_zftl_try_evict(struct dm_zftl_target * dm_zftl, struct dm_zftl_l2p_mem_pool * l2p_cache);
 struct dm_zftl_io_work * dm_zftl_get_io_work(struct dm_zftl_target *dm_zftl, struct bio *bio);
 int dm_zftl_cmp_(const void *a,const void *b);
