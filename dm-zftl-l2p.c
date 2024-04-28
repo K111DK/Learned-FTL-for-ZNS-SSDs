@@ -5,6 +5,42 @@
 #define DM_ZFTL_SFTL_L2P_FRAME_LENGTH (1024)
 #define DM_ZFTL_LEAFTL_L2P_FRAME_LENGTH (256)
 #define DM_ZFTL_MAX_L2P_SIZE ((unsigned int) 100 * 4 * 1024) // in bytes 2GB
+unsigned int dm_zftl_lea_dftl_mixed_get_cache_size(struct dm_zftl_mapping_table * mapping_table){
+#if !DM_ZFTL_USING_MIX
+    return 0;
+#endif
+    unsigned int vaild_lpn = 0;
+    unsigned int i;
+    for(i = 0; i < mapping_table->l2p_table_sz; ++i){
+        if(mapping_table->l2p_table[i] != DM_ZFTL_UNMAPPED_PPA && dm_zftl_lpn_is_in_cache(mapping_table, i) &&
+                dm_zftl_ppn_is_valid(mapping_table, mapping_table->l2p_table[i])){
+            vaild_lpn++;
+        }
+    }
+    return vaild_lpn * 8;
+}
+unsigned int dm_zftl_lea_sftl_mixed_get_cache_size(struct dm_zftl_mapping_table * mapping_table){
+#if !DM_ZFTL_USING_MIX
+    return 0;
+#endif
+    unsigned int i;
+    unsigned int vaild_lpn = 0;
+    unsigned int curr_ppn = 0;
+    unsigned int pre_ppn = 0;
+    unsigned int head_count = 0;
+    for(i = 0; i < mapping_table->l2p_table_sz; ++i){
+        if(mapping_table->l2p_table[i] != DM_ZFTL_UNMAPPED_PPA && dm_zftl_lpn_is_in_cache(mapping_table, i) &&
+           dm_zftl_ppn_is_valid(mapping_table, mapping_table->l2p_table[i])){
+            vaild_lpn++;
+            curr_ppn = mapping_table->l2p_table[i];
+            if(curr_ppn != pre_ppn + 1){
+                head_count++;
+            }
+            pre_ppn = curr_ppn;
+        }
+    }
+    return head_count * 8 + mapping_table->nr_l2p_lock_slice * 2 / 8;
+}
 unsigned int dm_zftl_sftl_get_size(struct dm_zftl_mapping_table * mapping_table){
     unsigned int curr_ppn = 0;
     unsigned int i;
@@ -530,12 +566,12 @@ void dm_zftl_compact_work(struct work_struct *work){
     struct dm_zftl_target * dm_zftl = _work->target;
     unsigned int i;
     for(i = 0; i < dm_zftl->mapping_table->lsm_tree->nr_frame ; ++i) {
-        mutex_lock(&dm_zftl->mapping_table->l2p_lock_array[i]);
+        mutex_lock(&dm_zftl->mapping_table->l2p_lock);
         lsm_tree_frame_compact__(&dm_zftl->mapping_table->lsm_tree->frame[i]);
 #if DM_ZFTL_COMPACT_WITH_PROMOTE
         lsm_tree_frame_promote__(&dm_zftl->mapping_table->lsm_tree->frame[i]);
 #endif
-        mutex_unlock(&dm_zftl->mapping_table->l2p_lock_array[i]);
+        mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
     }
     kvfree(_work);
 }

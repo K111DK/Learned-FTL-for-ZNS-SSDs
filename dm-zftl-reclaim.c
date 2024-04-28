@@ -343,31 +343,39 @@ void dm_zftl_valid_data_writeback(struct work_struct *work){
     unsigned int pre_lpn = 0;
     unsigned int lpn = 0;
 
+//    for(i = 0 ; i <= dm_zftl->mapping_table->nr_l2p_lock_slice; ++i){
+//        mutex_lock(&dm_zftl->mapping_table->l2p_lock_array[i]);
+//        //copy_job->copy_buffer->lock_ptr_array[i] = NULL;
+//    }
+    mutex_lock(&dm_zftl->mapping_table->l2p_lock);
     copy_job->copy_buffer->tail_lock_idx = 0;
     for(i = 0; i < copy_job->nr_blocks; ++i){
         ppn = copy_job->copy_buffer->lpn_buffer[i].ppn;
         lpn = copy_job->copy_buffer->lpn_buffer[i].lpn;
 
-        if(lpn != DM_ZFTL_UNMAPPED_LPA){
-            struct mutex * frame_lock = copy_job->copy_buffer->lock_ptr_array[copy_job->copy_buffer->tail_lock_idx];
-            struct mutex * current_lock_frame = &dm_zftl->mapping_table->l2p_lock_array[lpn / DM_ZFTL_LOCK_GRAN];
-            int need_lock = 0;
-            if(frame_lock == NULL){
-                copy_job->copy_buffer->lock_ptr_array[copy_job->copy_buffer->tail_lock_idx] = current_lock_frame;
-                mutex_lock(current_lock_frame);
-            }else{
-                if(frame_lock != current_lock_frame){
-                    copy_job->copy_buffer->tail_lock_idx++;
-                    copy_job->copy_buffer->lock_ptr_array[copy_job->copy_buffer->tail_lock_idx] = current_lock_frame;
-                    mutex_lock(current_lock_frame);
-                }
-            }
-        }
-
-        BUG_ON(lpn < pre_lpn);
-        pre_lpn = lpn;
+//        if(lpn != DM_ZFTL_UNMAPPED_LPA){
+//            struct mutex * frame_lock = copy_job->copy_buffer->lock_ptr_array[copy_job->copy_buffer->tail_lock_idx];
+//            struct mutex * current_lock_frame = &dm_zftl->mapping_table->l2p_lock_array[lpn / DM_ZFTL_LOCK_GRAN];
+//            int need_lock = 0;
+//            if(frame_lock == NULL){
+//                copy_job->copy_buffer->lock_ptr_array[copy_job->copy_buffer->tail_lock_idx] = current_lock_frame;
+//                mutex_lock(current_lock_frame);
+//            }else{
+//                if(frame_lock != current_lock_frame){
+//                    copy_job->copy_buffer->tail_lock_idx++;
+//                    copy_job->copy_buffer->lock_ptr_array[copy_job->copy_buffer->tail_lock_idx] = current_lock_frame;
+//                    mutex_lock(current_lock_frame);
+//                }
+//            }
+//        }
+//        BUG_ON(lpn < pre_lpn);
+//        pre_lpn = lpn;
 
         if(dm_zftl_ppn_is_valid(copy_job->dm_zftl->mapping_table, ppn)){
+            if(copy_job->copy_buffer->lpn_buffer[i].lpn != dm_zftl->mapping_table->p2l_table[ppn] || copy_job->copy_buffer->lpn_buffer[i].lpn == DM_ZFTL_UNMAPPED_LPA){
+                printk(KERN_EMERG "Err:ppn:%u lpn:%u p2l got:%u",ppn, lpn, dm_zftl->mapping_table->p2l_table[ppn]);
+                BUG_ON(1);
+            }
             copy_job->copy_buffer->lpn_buffer[next_valid_idx] = copy_job->copy_buffer->lpn_buffer[i];
             copy_job->copy_buffer->sorted_lpn_array[next_valid_idx] = copy_job->copy_buffer->lpn_buffer[i].lpn;
             next_valid_idx++;
@@ -394,9 +402,11 @@ void dm_zftl_valid_data_writeback(struct work_struct *work){
                                         dmz_sect2blk(start_ppa),
                                         copy_job->copy_buffer->nr_valid_blocks);
 
-    for(i = 0 ; i <= copy_job->copy_buffer->tail_lock_idx; ++i){
-        mutex_unlock(copy_job->copy_buffer->lock_ptr_array[i]);
-    }
+//    for(i = 0 ; i <= dm_zftl->mapping_table->nr_l2p_lock_slice; ++i){
+//        mutex_unlock(&dm_zftl->mapping_table->l2p_lock_array[i]);
+//        //copy_job->copy_buffer->lock_ptr_array[i] = NULL;
+//    }
+    mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
 
 
 

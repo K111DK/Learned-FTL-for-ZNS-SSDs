@@ -49,7 +49,7 @@
 #define KB 2 /* in sectors */
 #define MB 1024 * KB
 #define GB 1024 * MB
-#define DM_ZFTL_FIFO_LOG_SIZE 40 * GB
+#define DM_ZFTL_FIFO_LOG_SIZE 2 * GB
 #define DM_ZFTL_ZNS_GC_ENABLE 0
 #define DM_ZFTL_PIN_DEBUG 0
 #define DM_ZFTL_USING_LEA_FTL 1
@@ -474,7 +474,8 @@ struct zoned_dev * dm_zftl_get_ppa_dev(struct dm_zftl_target * dm_zftl, sector_t
 void dm_zftl_compact_work(struct work_struct *work);
 void dm_zftl_lsm_tree_try_compact(struct dm_zftl_target * dm_zftl);
 int dm_zftl_need_gc(struct dm_zftl_target * dm_zftl);
-
+unsigned int dm_zftl_lea_dftl_mixed_get_cache_size(struct dm_zftl_mapping_table * mapping_table);
+unsigned int dm_zftl_lea_sftl_mixed_get_cache_size(struct dm_zftl_mapping_table * mapping_table);
 
 
 

@@ -1161,10 +1161,10 @@ struct segment * greedy_piecewise_linear_regression__(const unsigned int * lpn_a
                     cone_apex.x = (s0.x + s1.x) / 2;
                     cone_apex.y = (s0.y + s1.y) / 2;// Div round down
 
-                    if(ERROR_BOUND <= 2) {
-                        cone_apex = s0;
-                    }
-
+//                    if(ERROR_BOUND <= 2) {
+//                        cone_apex = s0;
+//                    }
+//                    cone_apex = s0;
                     upper_rho.numerator = get_point_upper(s1).y - cone_apex.y;
                     upper_rho.denominator = get_point_upper(s1).x - cone_apex.x;
                     upper_point__ = get_point_upper(s1);
@@ -1197,7 +1197,7 @@ struct segment * greedy_piecewise_linear_regression__(const unsigned int * lpn_a
                     tail_mid_point.y = ( upper_point__.y + lower_point__.y )/ 2;
 
 //                    k.numerator = tail_mid_point.y - cone_apex.y;
-//                    k.denominator = tail_mid_point.x - cone_apex.x;
+//                    k.denominator = tail_mhugeid_point.x - cone_apex.x;
 
                     k.numerator = upper_rho.numerator * lower_rho.denominator + lower_rho.numerator * upper_rho.denominator;
                     k.denominator = upper_rho.denominator * lower_rho.denominator * 2;
@@ -1798,6 +1798,8 @@ void free_seg(struct segment * seg){
 
 // make sure max valid ppn no greadter than MAX + err_bound
 unsigned int lsm_tree_predict_correct(unsigned int *p2l_table, unsigned int lpn, unsigned int predicted_ppn) {
+    if(lpn == DM_ZFTL_UNMAPPED_LPA)
+        return DM_ZFTL_UNMAPPED_PPA;
     unsigned int predicted_lpn = p2l_table[predicted_ppn];
     if(predicted_lpn == lpn)
         return predicted_ppn;

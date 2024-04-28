@@ -59,15 +59,25 @@ sector_t dm_zftl_get(struct dm_zftl_mapping_table * mapping_table, sector_t lba)
     unsigned int ppn = dm_zftl_l2p_get(mapping_table, lpn);
     return dmz_blk2sect(ppn);
 }
-
+//+0x6a
 int dm_zftl_set_by_bn(struct dm_zftl_mapping_table * mapping_table, sector_t lpn, sector_t ppn){
     sector_t original_ppn;
+    if(lpn >= mapping_table->l2p_table_sz){
+        printk(KERN_EMERG "lpn:%u", lpn);
+        BUG_ON(1);
+    }
+    //LPN:A (Locked!)
+    //
+    //
+    //ppn:C
     original_ppn = mapping_table->l2p_table[lpn];
-    mapping_table->l2p_table[lpn] = ppn;
-    mapping_table->p2l_table[ppn] = lpn;
-
     dm_zftl_invalidate_ppn(mapping_table, original_ppn);
     dm_zftl_validate_ppn(mapping_table, ppn);
+    mapping_table->l2p_table[lpn] = ppn;
+    mapping_table->p2l_table[ppn] = lpn;
+    mapping_table->p2l_table[original_ppn] = DM_ZFTL_UNMAPPED_LPA;
+    BUG_ON(dm_zftl_ppn_is_valid(mapping_table, original_ppn));
+    BUG_ON(!dm_zftl_ppn_is_valid(mapping_table, ppn));
     return 0;
 }
 
@@ -78,6 +88,7 @@ int dm_zftl_set(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sect
     ppn = dmz_sect2blk(ppa);
     mapping_table->l2p_table[lpn] = ppn;
     mapping_table->p2l_table[ppn] = lpn;
+    mapping_table->p2l_table[original_ppn] = DM_ZFTL_UNMAPPED_LPA;
     dm_zftl_invalidate_ppn(mapping_table, original_ppn);
     dm_zftl_validate_ppn(mapping_table, ppn);
     return 0;
@@ -117,9 +128,13 @@ int dm_zftl_update_mapping_cache(struct dm_zftl_mapping_table * mapping_table, s
     unsigned int lpn = dmz_sect2blk(lba);
     unsigned int start_lock_frame = lpn / DM_ZFTL_LOCK_GRAN;
     unsigned int end_lock_frame = (lpn + nr_blocks) / DM_ZFTL_LOCK_GRAN;
-    for(i = start_lock_frame; i <= end_lock_frame; ++i ){
-        mutex_lock(&mapping_table->l2p_lock_array[i]);
-    }
+//    for(i = start_lock_frame; i <= end_lock_frame; ++i ){
+//        mutex_lock(&mapping_table->l2p_lock_array[i]);
+//    }
+//    for(i = 0 ; i <= mapping_table->nr_l2p_lock_slice; ++i){
+//        mutex_lock(&mapping_table->l2p_lock_array[i]);
+//    }
+    mutex_lock(&mapping_table->l2p_lock);
 
 #if DM_ZFTL_USING_LEA_FTL
 
@@ -144,9 +159,13 @@ int dm_zftl_update_mapping_cache(struct dm_zftl_mapping_table * mapping_table, s
 #endif
 
 
-    for(i = start_lock_frame; i <= end_lock_frame; ++i ){
-        mutex_unlock(&mapping_table->l2p_lock_array[i]);
-    }
+//    for(i = start_lock_frame; i <= end_lock_frame; ++i ){
+//        mutex_unlock(&mapping_table->l2p_lock_array[i]);
+//    }
+//    for(i = 0 ; i <= mapping_table->nr_l2p_lock_slice; ++i){
+//        mutex_unlock(&mapping_table->l2p_lock_array[i]);
+//    }
+    mutex_unlock(&mapping_table->l2p_lock);
 
     struct dm_zftl_target * dm_zftl = mapping_table->dm_zftl;
 
@@ -362,19 +381,20 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
 
         lpn = dmz_sect2blk(start_sec) + i;
         lock_frame = lpn / DM_ZFTL_LOCK_GRAN;
-        mutex_lock(&dm_zftl->mapping_table->l2p_lock_array[lock_frame]);
+        //mutex_lock(&dm_zftl->mapping_table->l2p_lock_array[lock_frame]);
+        mutex_lock(&dm_zftl->mapping_table->l2p_lock);
 
 
         ppa = dm_zftl_get(dm_zftl->mapping_table, start_sec + i * dmz_blk2sect(1));
         cal_ppn = dmz_sect2blk(ppa);
         ppn = cal_ppn;
 #if DM_ZFTL_USING_MIX || DM_ZFTL_USING_LEA_FTL
-        if(unlikely(cal_ppn != DM_ZFTL_UNMAPPED_PPA)){
-        if(unlikely(dm_zftl->mapping_table->p2l_table[cal_ppn] != lpn)){
-            do_correct_extra_read = 1;
-            ppn = lsm_tree_predict_correct(dm_zftl->mapping_table->p2l_table, lpn, cal_ppn);
+        if((cal_ppn != DM_ZFTL_UNMAPPED_PPA)){
+            if(unlikely(dm_zftl->mapping_table->p2l_table[cal_ppn] != lpn)){
+                do_correct_extra_read = 1;
+                ppn = lsm_tree_predict_correct(dm_zftl->mapping_table->p2l_table, lpn, cal_ppn);
+            }
         }
-    }
 #endif
         if(unlikely(ppn != dm_zftl->mapping_table->l2p_table[lpn])) {
             printk(KERN_EMERG
@@ -387,8 +407,8 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
             //BUG_ON(1);
         }
         //read_io->ppn = ppn;//True ppn
-        mutex_unlock(&dm_zftl->mapping_table->l2p_lock_array[lock_frame]);
-
+        //mutex_unlock(&dm_zftl->mapping_table->l2p_lock_array[lock_frame]);
+        mutex_unlock(&dm_zftl->mapping_table->l2p_lock);
 
         dev = dm_zftl_get_ppa_dev(dm_zftl, dmz_blk2sect(ppn));
         where.bdev = dev->bdev;
@@ -1254,6 +1274,8 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
 
 
     DMEMIT("Mapping table leaftl size:%u B\n", lsm_tree_get_size(tree));
+    DMEMIT("Mapiing table fg dftl size:%u B\n", dm_zftl_lea_dftl_mixed_get_cache_size(dm_zftl->mapping_table));
+    DMEMIT("Mapiing table fg sftl size:%u B\n", dm_zftl_lea_sftl_mixed_get_cache_size(dm_zftl->mapping_table));
 
     for(frame_no = 0; frame_no < tree->nr_frame ; frame_no++) {
 
@@ -1304,7 +1326,8 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
     unsigned int p50_level;
     unsigned int p99_level;
     unsigned int max_level;
-    DMEMIT("Avg level: %d.%d%d [%d / %d] \n"    , level_sum / not_empty_level_sum
+    if(not_empty_level_sum)
+        DMEMIT("Avg level: %d.%d%d [%d / %d] \n"    , level_sum / not_empty_level_sum
                                                 , (level_sum * 10 / not_empty_level_sum) % 10
                                                 , (level_sum * 100 / not_empty_level_sum) % 100
                                                 , level_sum, not_empty_level_sum);
@@ -1336,7 +1359,8 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
             max_look_up = z;
         total_look_up += (z) * atomic_read(&dm_zftl->mapping_table->lsm_tree->look_up_hist[z]);
     }
-    DMEMIT("Total # of look up:%u,  # of mispredict:%u [%u%%] \n" , total_query
+    if(total_query)
+        DMEMIT("Total # of look up:%u,  # of mispredict:%u [%u%%] \n" , total_query
                                                                         , total_mispredict
                                                                         , total_mispredict * 100 / total_query);
     DMEMIT("Look up dist:\n[1]:%u  [2]:%u  [3]:%u  [4]:%u  [5]:%u\n"
@@ -1345,7 +1369,8 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
             , atomic_read(&dm_zftl->mapping_table->lsm_tree->look_up_hist[3])
             , atomic_read(&dm_zftl->mapping_table->lsm_tree->look_up_hist[4])
             , atomic_read(&dm_zftl->mapping_table->lsm_tree->look_up_hist[5]));
-    DMEMIT("Look up cost: Avg:%u.%u%u Max:%u\n"  , total_look_up / total_query
+    if(total_query)
+        DMEMIT("Look up cost: Avg:%u.%u%u Max:%u\n"  , total_look_up / total_query
                                             , (total_look_up * 10 / total_query) % 10
                                             , (total_look_up * 100 / total_query) % 10
                                             , max_look_up);
