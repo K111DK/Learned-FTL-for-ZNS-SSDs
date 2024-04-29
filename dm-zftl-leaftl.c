@@ -99,6 +99,7 @@ void lsm_tree_insert(struct segment * seg, struct lsm_tree * lsm_tree){
     struct segment * overlap_segs = NULL;
 
     overlap_segs = lsm_tree_insert_segs_to_level_(seg, first_level);
+    lsm_tree_seq_merge(first_level);
     if(overlap_segs){
         struct lsm_tree_level * new_level = lsm_tree_insert_new_level_(frame, first_level);
         overlap_segs = lsm_tree_insert_segs_to_level_(overlap_segs, new_level);
@@ -446,6 +447,45 @@ int lsm_tree_try_merge_seg_(struct segment *origin_seg,
 // if we know ppn1 ( = f(lpn1) ),
 // we can get ppn3 = f(lpn1) + 2
 // without calculate f(lpn3) and do local search around f(lpn3)
+void lsm_tree_seq_merge(struct lsm_tree_level * level) {
+    if(!level)
+        return;
+    struct segment * curr_seg = level->seg;
+    if(!curr_seg)
+        return;
+    struct segment * next_seg = curr_seg->next;
+    while(curr_seg) {
+        if(!curr_seg->is_seq_seg){
+            curr_seg = curr_seg->next;
+            continue;
+        }
+        next_seg = curr_seg->next;
+        if(!next_seg)
+            break;
+        if(!next_seg->is_seq_seg){
+            curr_seg = next_seg->next;
+            continue;
+        }
+        BUG_ON(next_seg->slope.denominator != next_seg->slope.numerator);
+        BUG_ON(curr_seg->slope.denominator != curr_seg->slope.numerator);
+        if(seg_end(curr_seg) + 1 != seg_start(next_seg)){
+            curr_seg = curr_seg->next;
+            continue;
+        }
+        unsigned int curr_end_ppn = seg_end(curr_seg) +
+                (unsigned int)curr_seg->intercept.numerator / curr_seg->intercept.denominator;
+        unsigned int next_start_ppn = seg_start(next_seg) +
+                (unsigned int)next_seg->intercept.numerator / next_seg->intercept.denominator;
+        if(curr_end_ppn + 1 != next_start_ppn){
+            curr_seg = next_seg;
+            continue;
+        }
+        curr_seg->len += (next_seg->len + 1);
+        curr_seg->next = next_seg->next;
+        free_seg(next_seg);
+        //printk(KERN_EMERG "Trigger seq compact\n");
+    }
+}
 struct segment * lsm_tree_get_ppn_segment(struct lsm_tree * lsm_tree, unsigned int lpn){
     struct segment * target_segment;
     unsigned int frame_no = lpn / DM_ZFTL_FRAME_LENGTH;

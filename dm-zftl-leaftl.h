@@ -242,7 +242,7 @@ struct frame_valid_bitmap *get_seg_bm(struct segment * seg);
 void lsm_tree_level_promote__(struct lsm_tree_level * upper_level, struct lsm_tree_level * lower_level);
 void free_seg(struct segment * seg);
 int lsm_tree_can_insert(struct lsm_tree_level * level, struct segment *insert_seg);
-
+void lsm_tree_seq_merge(struct lsm_tree_level * level);
 int lsm_tree_try_clean_seg(struct frame_valid_bitmap * upper_bm, struct segment * origin_seg);
 unsigned int lsm_tree_predict_correct(unsigned int *p2l_table, unsigned int lpn, unsigned int predicted_ppn);
 #endif //LEAFTL_DM_ZFTL_LEAFTL_H
