@@ -12,7 +12,7 @@
 #define seg_start(seg) (seg->start_lpn)
 #define DM_ZFTL_LEA_ORIGIN 1
 #define ERROR_BOUND 16
-#define DM_ZFTL_COMPACT_WITH_PROMOTE 0
+#define DM_ZFTL_COMPACT_WITH_PROMOTE 1
 #define DM_ZFTL_DIV_ROUND_UP(n,d) (((n) + (d) - 1) / (d))
 #define ASSETR_UINT_EQ(eq1, eq2, test_name)     do {if(eq1 != eq2) \
                                                         printk("Test %s error: Expected:%u Got:%u\n", test_name, eq1, eq2); \

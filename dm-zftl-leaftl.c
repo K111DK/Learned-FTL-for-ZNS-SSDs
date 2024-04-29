@@ -1161,10 +1161,7 @@ struct segment * greedy_piecewise_linear_regression__(const unsigned int * lpn_a
                     cone_apex.x = (s0.x + s1.x) / 2;
                     cone_apex.y = (s0.y + s1.y) / 2;// Div round down
 
-//                    if(ERROR_BOUND <= 2) {
-//                        cone_apex = s0;
-//                    }
-//                    cone_apex = s0;
+                    cone_apex = s0;
                     upper_rho.numerator = get_point_upper(s1).y - cone_apex.y;
                     upper_rho.denominator = get_point_upper(s1).x - cone_apex.x;
                     upper_point__ = get_point_upper(s1);

@@ -42,7 +42,7 @@
 
 #define DM_ZFTL_L2P_PIN (0)
 #define DM_ZFTL_COMPACT_ENABLE 1
-#define DM_ZFTL_COMPACT_INTERVAL 2000000 //50 * 4MB = 200MB
+#define DM_ZFTL_COMPACT_INTERVAL 1000000 //50 * 4MB = 200MB
 #define DM_ZFTL_FOREGROUND_RECLAIM_IO_BLOCK_THESHOLD 2
 #define DM_ZFTL_FOREGROUND_IO_BLOCK_THESHOLD 2
 #define DM_ZFTL_MAX_RECLAIM_BUFFER 1
@@ -77,6 +77,7 @@
  * Creates block devices with 4KB blocks, always.
  * copy from dm-zoned
  */
+// y = k * x + b  y1 - y2
 #define DMZ_BLOCK_SHIFT		12
 #define DMZ_BLOCK_SIZE		(1 << DMZ_BLOCK_SHIFT)
 #define DMZ_BLOCK_MASK		(DMZ_BLOCK_SIZE - 1)

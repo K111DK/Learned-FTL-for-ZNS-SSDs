@@ -42,16 +42,25 @@ unsigned int dm_zftl_lea_sftl_mixed_get_cache_size(struct dm_zftl_mapping_table 
     return head_count * 8 + mapping_table->nr_l2p_lock_slice * 2 / 8;
 }
 unsigned int dm_zftl_sftl_get_size(struct dm_zftl_mapping_table * mapping_table){
-    unsigned int curr_ppn = 0;
-    unsigned int i;
-    unsigned int pre_ppn = 0;
+    unsigned int curr_ppn;
+    unsigned int curr_lpn;
     unsigned int head_count = 0;
-    for(i = 0; i < mapping_table->l2p_table_sz; ++i){
-        if(mapping_table->l2p_table[i] != DM_ZFTL_UNMAPPED_PPA){
-            curr_ppn = mapping_table->l2p_table[i];
-            if(curr_ppn != pre_ppn + 1){
-                head_count++;
+    unsigned int total_frame = mapping_table->l2p_table_sz / 256;
+    unsigned int frame_no;
+    unsigned int offset;
+    for(frame_no = 0; frame_no < total_frame; ++ frame_no){
+        unsigned int pre_ppn = 0;
+        unsigned int pre_lpn = 0;
+
+        for(offset = 0 ;offset < 256; ++offset){
+            curr_lpn = offset + frame_no * 256;
+            curr_ppn = mapping_table->l2p_table[curr_lpn];
+            if(curr_ppn != DM_ZFTL_UNMAPPED_PPA){
+               if(pre_lpn + 1 != curr_lpn  || pre_ppn + 1 != curr_ppn){
+                   head_count++;
+               }
             }
+            pre_lpn = curr_lpn;
             pre_ppn = curr_ppn;
         }
     }
