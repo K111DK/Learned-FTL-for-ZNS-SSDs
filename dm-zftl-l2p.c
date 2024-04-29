@@ -555,7 +555,8 @@ void dm_zftl_l2p_evict_cb(unsigned long error, void * context){
 }
 
 void dm_zftl_lsm_tree_try_compact(struct dm_zftl_target * dm_zftl){
-    if((dm_zftl->last_compact_traffic_ >= DM_ZFTL_COMPACT_INTERVAL) && DM_ZFTL_COMPACT_ENABLE){
+    if((dm_zftl->last_compact_traffic_ >= DM_ZFTL_COMPACT_INTERVAL) && DM_ZFTL_COMPACT_ENABLE
+        && DM_ZFTL_USING_LEA_FTL){
 
 #if DM_ZFTL_COMPACT_DEBUG
         printk(KERN_EMERG "[Compact] Trigger Compact");

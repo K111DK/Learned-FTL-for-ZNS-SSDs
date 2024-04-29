@@ -550,8 +550,6 @@ unsigned int lsm_tree_get_ppn(struct lsm_tree * lsm_tree, unsigned int lpn){
 
                 /* This lpn doesn't in this seg, keep searching */
                 if(lpn_offset_in_seg != -1){
-                    if(!target_segment->is_acc_seg)
-                        atomic_inc(&lsm_tree->nr_mispredict);
                     /* Found in approximate seg */
                     ppn = lsm_tree_cal_ppn_(target_segment, lpn);
                     break;

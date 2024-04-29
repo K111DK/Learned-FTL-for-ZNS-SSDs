@@ -57,7 +57,7 @@
 #define DM_ZFTL_VMA_COPY_TEST 0
 #define DM_ZFTL_RECLAIM_ENABLE 1
 #define DM_ZFTL_RECLAIM_THRESHOLD 10
-#define DM_ZFTL_RECLAIM_INTERVAL 2 * GB
+#define DM_ZFTL_RECLAIM_INTERVAL 10 * GB
 #define DM_ZFTL_RECLAIM_DEBUG 0
 #define DM_ZFTL_RECLAIM_MAX_READ_NUM_DEFAULT 1
 #define DM_ZFTL_LOCK_GRAN 256
@@ -162,6 +162,9 @@ enum {
 
 struct dm_zftl_io_work{
 
+    int do_extra_access;
+    unsigned int checkout_ppn;
+    struct iorq_dispatch_work * iorq_work;
     /* For cloned BIOs to read bio*/
     struct bio_set		bio_set;
 
