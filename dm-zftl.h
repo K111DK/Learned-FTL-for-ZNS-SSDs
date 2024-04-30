@@ -49,7 +49,7 @@
 #define KB 2 /* in sectors */
 #define MB 1024 * KB
 #define GB 1024 * MB
-#define DM_ZFTL_FIFO_LOG_SIZE 2 * GB
+#define DM_ZFTL_FIFO_LOG_SIZE 1 * GB
 #define DM_ZFTL_ZNS_GC_ENABLE 0
 #define DM_ZFTL_PIN_DEBUG 0
 #define DM_ZFTL_USING_LEA_FTL 1
@@ -141,7 +141,8 @@ void dm_zftl_lpn_set_dev(struct dm_zftl_mapping_table * mapping_table, unsigned 
 //int dm_zftl_set(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa);
 //int dm_zftl_update_mapping(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, unsigned int nr_blocks);
 void dm_zftl_correct_predict_ppn(unsigned long error, void * context);
-void dm_zftl_read_clone_endio(struct bio *clone);
+//void dm_zftl_read_clone_endio(struct bio *clone);
+void dm_zftl_read_clone_endio(unsigned long error, void * context);
 struct dm_zftl_read_io {
     struct dm_zftl_target * dm_zftl;
     struct bio * bio;

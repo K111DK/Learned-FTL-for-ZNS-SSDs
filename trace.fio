@@ -3,4 +3,4 @@ ioengine=libaio
 direct=1
 iodepth=32
 numjobs=1
-read_iolog=fio_cheetah.csv
+read_iolog=fio_hm_0.csv

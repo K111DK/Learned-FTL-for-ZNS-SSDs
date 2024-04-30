@@ -359,25 +359,10 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
     unsigned int cal_ppn;
     unsigned int ppn;
 
-//    struct dm_zftl_read_io * read_io = (struct dm_zftl_read_io *)kvmalloc(sizeof( struct dm_zftl_read_io), GFP_KERNEL);
-//    read_io->bio = bio;
-//    read_io->nr_io = nr_blocks;
-//    read_io->complete_io = 0;
-//    read_io->dm_zftl = dm_zftl;
-//    read_io->lpn = lpn;
-//    spin_lock_init(&read_io->lock_);
 
     unsigned int lock_frame;
     unsigned int lpn;
     for(i = 0 ; i < nr_blocks; ++i){
-
-
-        struct bio *clone;
-        clone = bio_clone_fast(bio, GFP_NOIO, &dm_zftl->bio_set);
-        if (!clone){
-            printk(KERN_EMERG "[READ] err no mem to clone read bio");
-            BUG_ON(1);
-        }
 
         lpn = dmz_sect2blk(start_sec) + i;
         lock_frame = lpn / DM_ZFTL_LOCK_GRAN;
@@ -434,26 +419,31 @@ int dm_zftl_dm_io_read(struct dm_zftl_target *dm_zftl,struct bio *bio){
         io_work->do_extra_access = do_correct_extra_read;
         io_work->checkout_ppn = cal_ppn;
 
+        struct dm_io_region where;
+        struct dm_io_request iorq;
+        iorq.bi_op = REQ_OP_READ;
+        iorq.bi_op_flags = 0;
+        iorq.mem.type = DM_IO_BIO;
+        iorq.mem.ptr.bio = bio;
+        iorq.notify.fn = dm_zftl_read_clone_endio;
+        iorq.notify.context = bio;
+        iorq.client = dm_zftl->io_client;
+
         dev = dm_zftl_get_ppa_dev(dm_zftl, dmz_blk2sect(ppn));
         where.bdev = dev->bdev;
         where.sector = dm_zftl_get_dev_addr(dm_zftl, dmz_blk2sect(ppn));
         where.count = dmz_blk2sect(1);
-        bio_set_dev(clone, dev->bdev);
-        clone->bi_iter.bi_sector = dmz_blk2sect(lpn);
-        clone->bi_iter.bi_size = dmz_blk2sect(1) << SECTOR_SHIFT;
-        clone->bi_end_io = dm_zftl_read_clone_endio;
-        clone->bi_private = bio;
-        submit_bio_noacct(clone);
-        bio_advance(bio, dmz_blk2sect(1));
+        dm_io(&iorq, 1, &where, NULL);
+        bio_advance(bio, 1 << DMZ_BLOCK_SHIFT);
     }
     return DM_MAPIO_SUBMITTED;
 }
-void dm_zftl_read_clone_endio(struct bio *clone)
+void dm_zftl_read_clone_endio(unsigned long error, void * context)
 {
-    struct bio *bio = clone->bi_private;
+    struct bio * bio = context;
     struct dm_zftl_io_work *io_work = dm_per_bio_data(bio, sizeof(struct dm_zftl_io_work));
     struct dm_zftl_target * dm_zftl =io_work->target;
-    bio_put(clone);
+    //bio_put(clone);
     if(atomic_dec_and_test(&io_work->io_in_wait)){
         if(io_work->do_extra_access){
             atomic_inc(&dm_zftl->mapping_table->lsm_tree->nr_mispredict);
@@ -505,6 +495,7 @@ void dm_zftl_iorq_dispatch(struct work_struct * work){
 
 void dm_zftl_dm_io_read_cb(unsigned long error, void * context){
     struct bio * bio = context;
+    struct dm_zftl_io_work *io_work = dm_per_bio_data(bio, sizeof(struct dm_zftl_io_work));
     bio_endio(bio);
 }
 
@@ -644,32 +635,6 @@ void dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
         dm_zftl->last_write_traffic_ += bio_sectors(bio);
     }
 
-#if DM_ZFTL_DEBUG
-    const char * op = "UNKNOWN";
-    switch (bio_op(bio)) {
-        case REQ_OP_READ:
-            op = "READ";
-            break;
-        case REQ_OP_WRITE:
-            op = "WRITE";
-            break;
-        case REQ_OP_DISCARD:
-            op = "DISCARD";
-            break;
-        case REQ_OP_WRITE_ZEROES:
-            op = "WRITE ZERO";
-            break;
-        default:
-            op = "UNKNOWN";
-    }
-    printk(KERN_EMERG "Bio:%s [%llu, %llu](sec) [%llu, %llu](blocks)",
-            op,
-            bio->bi_iter.bi_sector,
-            bio->bi_iter.bi_sector + bio_sectors(bio),
-            dmz_bio_block(bio),
-            dmz_bio_block(bio) + dmz_bio_blocks(bio)
-            );
-#endif
 
     switch (bio_op(bio)) {
         case REQ_OP_READ:
@@ -753,6 +718,32 @@ void lsm_tree_frame_status_check(struct lsm_tree * tree, status_type_t type,
  */
 static int dm_zftl_map(struct dm_target *ti, struct bio *bio)
 {
+#if DM_ZFTL_DEBUG
+    const char * op = "UNKNOWN";
+    switch (bio_op(bio)) {
+        case REQ_OP_READ:
+            op = "READ";
+            break;
+        case REQ_OP_WRITE:
+            op = "WRITE";
+            break;
+        case REQ_OP_DISCARD:
+            op = "DISCARD";
+            break;
+        case REQ_OP_WRITE_ZEROES:
+            op = "WRITE ZERO";
+            break;
+        default:
+            op = "UNKNOWN";
+    }
+    printk(KERN_EMERG "Bio:%s [%llu, %llu](sec) [%llu, %llu](blocks)",
+            op,
+            bio->bi_iter.bi_sector,
+            bio->bi_iter.bi_sector + bio_sectors(bio),
+            dmz_bio_block(bio),
+            dmz_bio_block(bio) + dmz_bio_blocks(bio)
+    );
+#endif
     struct dm_zftl_target *dm_zftl = ti->private;
     struct zoned_dev *dev = dm_zftl->zone_device;
     sector_t sector = bio->bi_iter.bi_sector;
@@ -767,25 +758,21 @@ static int dm_zftl_map(struct dm_target *ti, struct bio *bio)
     if (!nr_sectors && bio_op(bio) != REQ_OP_WRITE)
         return DM_MAPIO_REMAPPED;
 
-    if(!dmz_bio_blocks(bio))
+    if(!dmz_bio_blocks(bio)) {
+        bio_endio(bio);
         return DM_MAPIO_SUBMITTED;
+    }
 
+    if(bio_op(bio) != REQ_OP_READ && bio_op(bio) != REQ_OP_WRITE){//We don't support discard
+        bio_endio(bio);
+        return DM_MAPIO_SUBMITTED;
+    }
 
     /* The BIO should be block aligned */
     if ((nr_sectors & DMZ_BLOCK_SECTORS_MASK) || (sector & DMZ_BLOCK_SECTORS_MASK)){
         printk(KERN_EMERG "Unaligned bio [%llu, %llu]",sector , sector + nr_sectors);
         return DM_MAPIO_KILL;
     }
-
-//    /* Split read io to 1 block [IMPORTANT] */
-//    if( nr_blocks > 1 && bio_op(bio) == REQ_OP_READ ){
-//        dm_accept_partial_bio(bio, dmz_blk2sect(1));
-//    }
-//
-//    if(dmz_bio_blocks(bio) > 1 && bio_op(bio) == REQ_OP_READ){
-//        printk(KERN_EMERG "[MAP]:Error got read bio > 1 blk");
-//        BUG_ON(1);
-//    }
 
 
     /* Initialize the BIO context */
@@ -811,12 +798,7 @@ static int dm_zftl_map(struct dm_target *ti, struct bio *bio)
     io_job->io_work = io_work;
     io_work->io_job = io_job;
 
-    if(bio_op(bio) != REQ_OP_READ && bio_op(bio) != REQ_OP_WRITE){
-        return DM_MAPIO_SUBMITTED;
-    }
 
-    if(!dmz_bio_blocks(bio))
-        return DM_MAPIO_SUBMITTED;
 
     /* Now ready to handle this BIO */
 #if DM_ZFTL_L2P_PIN
