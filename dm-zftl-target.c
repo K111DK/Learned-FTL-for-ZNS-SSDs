@@ -1196,6 +1196,10 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
     DMEMIT("\n");
     DMEMIT("<=========================================>\n");
 #if DM_ZFTL_USING_LEA_FTL
+    unsigned int len_dist[8];//1 2 4 8 16 32 64 128 >128
+    unsigned int ll = 0;
+    for(ll = 0; ll < 8; ++ll)
+        len_dist[ll] = 0;
     struct dm_zftl_compact_work * _work = kvmalloc(sizeof(struct dm_zftl_compact_work), GFP_NOIO);
     _work->target = dm_zftl;
     dm_zftl_compact_work((struct work_struct *)_work);
@@ -1219,10 +1223,11 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
     }
 
 
+    unsigned int error_bound = ERROR_BOUND;
     DMEMIT("Mapping table leaftl size:%u B\n", lsm_tree_get_size(tree));
     DMEMIT("Mapiing table fg dftl size:%u B\n", dm_zftl_lea_dftl_mixed_get_cache_size(dm_zftl->mapping_table));
     DMEMIT("Mapiing table fg sftl size:%u B\n", dm_zftl_lea_sftl_mixed_get_cache_size(dm_zftl->mapping_table));
-
+    DMEMIT("Error bound: %d\n", error_bound);
     for(frame_no = 0; frame_no < tree->nr_frame ; frame_no++) {
 
         struct lsm_tree_frame * frame = &tree->frame[frame_no];
@@ -1245,13 +1250,16 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
         while(level) {
             struct segment * segs = level->seg;
             while(segs) {
+                dm_zftl_leaftl_segment_len_recorder(len_dist, segs);
                 if(segs->is_acc_seg)
                     acc_count += 1;
                 else {
                     appro_count += 1;
                 }
+
                 if(!segs->is_seq_seg){
-                    crb_count += (int)segs->CRB->buffer_len;
+                    if((int)segs->CRB->buffer_len > 2)
+                        crb_count += (int)segs->CRB->buffer_len;
                 }
                 segs = segs->next;
             }
@@ -1293,6 +1301,13 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
                max_level,
                p99_level,
                p50_level);
+    }
+    if(appro_count + acc_count){
+        DMEMIT("Segment len cdf:\n");
+        unsigned int e = 0;
+        for( e = 0; e < 8; ++e ){
+            DMEMIT("[len <= %u]: [%u%%]\n", 1 << e, len_dist[e] * 100 / (appro_count + acc_count));
+        }
     }
     DMEMIT("<=========================================>\n");
     unsigned int total_query = atomic_read(&dm_zftl->mapping_table->lsm_tree->nr_total_query);
@@ -1445,6 +1460,32 @@ int dm_zftl_reset_all(struct zoned_dev * dev){
     printk(KERN_EMERG "Reset All zone complete!");
 #endif
     return 0;
+}
+void dm_zftl_leaftl_segment_len_recorder(unsigned int * seg_len_hist, struct segment * seg){
+    if(!seg)
+        return;
+    unsigned int seg_len = 0;
+    if(seg->is_seq_seg) {
+        seg_len = seg->len + 1;
+    }else{
+        seg_len = seg->CRB->buffer_len;
+    }
+    if(seg_len == 1)
+        seg_len_hist[0] += 1;
+    if(seg_len <= 2)
+        seg_len_hist[1] += 1;
+    if(seg_len <= 4)
+        seg_len_hist[2] += 1;
+    if(seg_len <= 8)
+        seg_len_hist[3] += 1;
+    if(seg_len <= 16)
+        seg_len_hist[4] += 1;
+    if(seg_len <= 32)
+        seg_len_hist[5] += 1;
+    if(seg_len <= 64)
+        seg_len_hist[6] += 1;
+    if(seg_len <= 128)
+        seg_len_hist[7] += 1;
 }
 /*
  *

@@ -49,7 +49,7 @@
 #define KB 2 /* in sectors */
 #define MB 1024 * KB
 #define GB 1024 * MB
-#define DM_ZFTL_FIFO_LOG_SIZE 1 * GB
+#define DM_ZFTL_FIFO_LOG_SIZE 5 * GB
 #define DM_ZFTL_ZNS_GC_ENABLE 0
 #define DM_ZFTL_PIN_DEBUG 0
 #define DM_ZFTL_USING_LEA_FTL 1
@@ -73,6 +73,7 @@
 #define DM_ZFTL_MIN_BIOS 8192
 #define BDEVNAME_SIZE 256
 #define DM_ZFTL_MIN_READ_BIOS 8192
+#define DM_ZFTL_SEGMENT_LENGTH_CDF_RANGE 128
 /*
  * Creates block devices with 4KB blocks, always.
  * copy from dm-zoned
@@ -587,6 +588,7 @@ void dm_zftl_valid_data_writeback_cb(unsigned long error, void * context);
 void dm_zftl_reclaim_read_cb(unsigned long error, void * context);
 void dm_zftl_queue_writeback( void * context);
 void dm_zftl_dm_io_read_cb(unsigned long error, void * context);
+void dm_zftl_leaftl_segment_len_recorder(unsigned int * seg_len_hist, struct segment * seg);
 #define DM_ZFTL_PAGE_SIZE (4096)// in bytes
 
 

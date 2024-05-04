@@ -1105,7 +1105,8 @@ unsigned int lsm_tree_get_seg_size__(struct segment * seg){
 
     //lpn size
     if(!seg->is_seq_seg){
-        total_size += seg->CRB->buffer_len * SIZE_FRAME_LPN_OFFSET_BYTES;
+        if(seg->CRB->buffer_len > 2)
+            total_size += seg->CRB->buffer_len * SIZE_FRAME_LPN_OFFSET_BYTES;
     }
 #endif
     return total_size;

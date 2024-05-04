@@ -11,7 +11,7 @@
 #define seg_end(seg) (seg->start_lpn + seg->len)
 #define seg_start(seg) (seg->start_lpn)
 #define DM_ZFTL_LEA_ORIGIN 1
-#define ERROR_BOUND 0
+#define ERROR_BOUND 4
 #define DM_ZFTL_COMPACT_WITH_PROMOTE 1
 #define DM_ZFTL_DIV_ROUND_UP(n,d) (((n) + (d) - 1) / (d))
 #define ASSETR_UINT_EQ(eq1, eq2, test_name)     do {if(eq1 != eq2) \
@@ -225,7 +225,7 @@ struct conflict_resolution_buffer * gen_CRB(const unsigned int * lpn_array, int 
 
 #define SIZE_CALCULATE_REAL 0 //Calculate with struct size
 #define SIZE_LPN_BYTES 4
-#define SIZE_INTERCEPTION_BYTES SIZE_START_LPN_BYTES
+#define SIZE_INTERCEPTION_BYTES 4
 #define SIZE_START_LPN_BYTES 1
 #define SIZE_LEN_BYTES 1
 #define SIZE_SLOPE_BYTES 2
