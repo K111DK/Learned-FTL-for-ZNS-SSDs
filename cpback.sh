@@ -1,1 +1,1 @@
-sshpass -p femu rsync -avz -e "ssh -p 8080"  femu@localhost:/tmp/dm-zoned/dm-zftl.ko /home/log/Desktop/dm-LZFTL/
+sshpass -p femu rsync -avz -e "ssh -p 8080"  femu@localhost:/tmp/dm-zoned/trace_lat.log /home/log/Desktop/dm-LZFTL/

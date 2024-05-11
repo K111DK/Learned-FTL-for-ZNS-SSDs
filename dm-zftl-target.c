@@ -455,34 +455,6 @@ void dm_zftl_read_clone_endio(unsigned long error, void * context)
     }
 }
 
-void dm_zftl_correct_predict_ppn(unsigned long error, void * context){
-    struct iorq_dispatch_work * iorq_work = kvmalloc(sizeof(struct iorq_dispatch_work), GFP_KERNEL);
-    struct dm_zftl_read_io * read_io =(struct dm_zftl_read_io *) context;
-    struct bio * bio = read_io->bio;
-    struct dm_zftl_target * dm_zftl = read_io->dm_zftl;
-    struct dm_io_region * where = kvmalloc(sizeof(struct dm_io_region), GFP_KERNEL | __GFP_ZERO);
-    struct zoned_dev * dev = dm_zftl_get_ppa_dev(dm_zftl, dmz_blk2sect(read_io->ppn));
-    where->bdev = dev->bdev;
-    where->sector = dm_zftl_get_dev_addr(dm_zftl, dmz_blk2sect(read_io->ppn));
-    where->count = dmz_blk2sect(1);
-
-    struct dm_io_request * iorq = kvmalloc(sizeof(struct iorq_dispatch_work), GFP_KERNEL);
-    iorq->bi_op = REQ_OP_READ;
-    iorq->bi_op_flags = 0;
-    iorq->mem.type = DM_IO_BIO;
-    iorq->mem.ptr.bio = read_io->bio;
-    iorq->notify.fn = dm_zftl_dm_io_read_cb;
-    iorq->notify.context = read_io;
-    iorq->client = dm_zftl->io_client;
-
-    iorq_work->iorq = iorq;
-    iorq_work->where = where;
-    iorq_work->num = 1;
-
-    INIT_WORK(&iorq_work->work, dm_zftl_iorq_dispatch);
-    queue_work(dm_zftl->iorq_dispatch_wq, &iorq_work->work);
-}
-
 void dm_zftl_iorq_dispatch(struct work_struct * work){
     struct iorq_dispatch_work * iorq_work = container_of(work, struct iorq_dispatch_work, work);
     struct dm_io_request iorq = *iorq_work->iorq;
@@ -511,7 +483,7 @@ void dm_zftl_dm_io_write_cb(unsigned long error, void * context){
 int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
     struct dm_zftl_io_work *context = dm_per_bio_data(bio, sizeof(struct dm_zftl_io_work));
     struct zoned_dev * dev = dm_zftl_get_foregound_io_dev(dm_zftl);
-    struct dm_io_region * where = kvmalloc_array(1, sizeof(struct dm_io_region), GFP_KERNEL | __GFP_ZERO);
+    struct dm_io_region where;
     int i, ret;
 
     context->target = dm_zftl;
@@ -544,9 +516,9 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
 
 
     ppa = start_ppa;
-    where->sector = dm_zftl_get_dev_addr(dm_zftl, ppa);
-    where->bdev = dev->bdev;
-    where->count = dmz_blk2sect(dmz_bio_blocks(bio));
+    where.sector = dm_zftl_get_dev_addr(dm_zftl, ppa);
+    where.bdev = dev->bdev;
+    where.count = dmz_blk2sect(dmz_bio_blocks(bio));
 
 
 
@@ -561,11 +533,11 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
 #if DM_ZFTL_DEBUG
     printk(KERN_EMERG "Bio:WRITE [%llu, %llu](sec) ==> Dev:%s Zone ID:%llu Range[%llu, %llu](sec)",
            start_sec,
-           start_sec + where->count,
+           start_sec + where.count,
            dm_zftl_is_cache(dev) ? "CACHE":"ZNS",
            dev->zoned_metadata->opened_zoned->id,
            dm_zftl_get_dev_addr(dm_zftl, ppa),
-           dm_zftl_get_dev_addr(dm_zftl, ppa) + where->count
+           dm_zftl_get_dev_addr(dm_zftl, ppa) + where.count
            );
 #endif
 
@@ -580,7 +552,7 @@ int dm_zftl_dm_io_write(struct dm_zftl_target *dm_zftl, struct bio *bio){
 
 
     //return dm_io(&iorq, 1, where, NULL);
-    dm_io(&iorq, 1, where, NULL);
+    dm_io(&iorq, 1, &where, NULL);
     ret = 0;
     return ret;
 
@@ -665,9 +637,6 @@ void dm_zftl_handle_bio(struct dm_zftl_target *dm_zftl,
                         bio_op(bio));
             ret = -EIO;
     }
-
-    kvfree(io->io_job);
-    kvfree(io);
     return;
 
     REQUEUE_WRITE:
@@ -1158,7 +1127,12 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
         goto err_dev;
 
     clear_bit_unlock(DMZAP_WR_OUTSTANDING, &dmz->zone_device->write_bitmap);
-
+    atomic_set(&dmz->l2p_cache_hit, 0);
+    atomic_set(&dmz->l2p_cache_miss, 0);
+    atomic_set(&dmz->l2p_swap_in_cnt, 0);
+    atomic_set(&dmz->l2p_swap_out_cnt, 0);
+    dmz->min_compact_usec = 1000000000;
+    dmz->max_compact_usec = 0;
 
 
     ti->max_io_len = dmz->zone_device->zone_nr_sectors;
@@ -1171,11 +1145,34 @@ static int dm_zftl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
     /* The exposed capacity is the zone device capicity*/
     ti->len = dmz->zone_device->capacity_nr_sectors;
 
+
+    /* Kick-off a zone mapping warm-up io, if we don't, any later read to l2p will complete instantly*/
+    unsigned int warm_up_i;
+    unsigned int warm_up_blks = dmz->cache_device->zone_nr_blocks;
+    for(warm_up_i = 0; warm_up_i < warm_up_blks; ++warm_up_i){
+        struct dm_io_region where;
+        struct dm_io_request iorq;
+        where.bdev = dmz->cache_device->bdev;
+        where.sector = dmz_blk2sect(warm_up_i);
+        where.count = dmz_blk2sect(1);
+        iorq.bi_op = REQ_OP_WRITE;
+        iorq.bi_op_flags = 0;
+        iorq.mem.type = DM_IO_VMA;
+        iorq.mem.ptr.vma = dmz->dummy_l2p_buffer;
+        iorq.notify.fn = dm_zftl_dummy_write_cb;
+        iorq.notify.context = NULL;
+        iorq.client = dmz->io_client;
+        dm_io(&iorq, 1, &where, NULL);
+    }
+
     return 0;
     err_map:
     err_meta:
     err_dev:
     return -1;
+}
+void dm_zftl_dummy_write_cb(unsigned long error, void * context){
+    return;
 }
 
 /*
@@ -1227,6 +1224,9 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
     DMEMIT("Mapping table leaftl size:%u B\n", lsm_tree_get_size(tree));
     DMEMIT("Mapiing table fg dftl size:%u B\n", dm_zftl_lea_dftl_mixed_get_cache_size(dm_zftl->mapping_table));
     DMEMIT("Mapiing table fg sftl size:%u B\n", dm_zftl_lea_sftl_mixed_get_cache_size(dm_zftl->mapping_table));
+    if(atomic_read(&tree->nr_slope))
+        DMEMIT("Bad slope %d of %d \n", atomic_read(&tree->slope_overflow)
+               , atomic_read(&tree->nr_slope));
     DMEMIT("Error bound: %d\n", error_bound);
     for(frame_no = 0; frame_no < tree->nr_frame ; frame_no++) {
 
@@ -1335,6 +1335,8 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
                                             , (total_look_up * 10 / total_query) % 10
                                             , (total_look_up * 100 / total_query) % 10
                                             , max_look_up);
+    DMEMIT("Max compact time:%u usecs\n",dm_zftl->max_compact_usec);
+    DMEMIT("Min compact time:%u usecs\n",dm_zftl->min_compact_usec);
     DMEMIT("<=========================================>\n");
 #endif
     DMEMIT("Mapping table sftl size:%u B\n", dm_zftl_sftl_get_size(dm_zftl->mapping_table));
@@ -1342,6 +1344,7 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
 #if DM_ZFTL_L2P_PIN
     DMEMIT("<=========================================>\n");
     struct dm_zftl_l2p_mem_pool * l2p_cache = dm_zftl->l2p_mem_pool;
+
     unsigned int i = 0;
     unsigned int pinned_frame_cnt = 0;
     unsigned int unpinned_frame_cnt = 0;
@@ -1367,11 +1370,21 @@ static void dm_zftl_status(struct dm_target *ti, status_type_t type,
     TAILQ_FOREACH(frame, &l2p_cache->_frame_list, list_entry){
         on_lru_frame_cnt++;
     }
+    int hit = atomic_read(&dm_zftl->l2p_cache_hit);
+    int miss = atomic_read(&dm_zftl->l2p_cache_miss);
+    int swap_in_out = atomic_read(&dm_zftl->l2p_swap_out_cnt)
+            + atomic_read(&dm_zftl->l2p_swap_in_cnt);
     DMEMIT("Total l2p frame on dram: %u\n", on_drame_frame_cnt);
     DMEMIT("Total pinned frame: %u\n", pinned_frame_cnt);
     DMEMIT("Total unpinned frame: %u\n", unpinned_frame_cnt);
     DMEMIT("Total on lru frame: %u\n", on_lru_frame_cnt);
+    if(hit + miss)
+        DMEMIT("L2p cache hit rate: %d%% [%u / %u]\n" , hit * 100 / (hit + miss)
+                                                      ,  hit
+                                                      ,  hit + miss);
+    DMEMIT("Total swap_in/swap_out io: %d\n", swap_in_out);
 #endif
+
     DMEMIT("<=========================================>\n");
     DMEMIT("Cache device : Full zone: %d / %u Used space: %u MiB/ %u MiB\n", atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_full_zone)
                                                                       , dm_zftl->cache_device->nr_zones
@@ -1409,16 +1422,10 @@ struct zoned_dev * dm_zftl_get_background_io_dev(struct dm_zftl_target * dm_zftl
 }
 
 struct zoned_dev * dm_zftl_get_foregound_io_dev(struct dm_zftl_target * dm_zftl){
-    /* Do we need this ? */
-//    if(atomic_read(&dm_zftl->cache_device->zoned_metadata->nr_free_zone) <= DM_ZFTL_FULL_THRESHOLD){
-//        printk(KERN_EMERG "Cache dev full. Now foregound io switch to ZNS");
-//        return dm_zftl->zone_device;
-//    }
     return dm_zftl->cache_device;
 }
 
 int dm_zftl_open_new_zone(struct zoned_dev * dev){
-
     if(atomic_read(&dev->zoned_metadata->nr_free_zone) == 0)
         return 1;
 
@@ -1434,6 +1441,7 @@ int dm_zftl_open_new_zone(struct zoned_dev * dev){
     list_del(&zone_link->link);
     atomic_dec(&dev->zoned_metadata->nr_free_zone);
     dev->zoned_metadata->opened_zoned = &dev->zoned_metadata->zones[zone_link->id];
+    kvfree(zone_link);
 #if DM_ZFTL_DEBUG
     printk(KERN_EMERG "Open new zone => Device:%s Id:%llu Range: [%llu, %llu](blocks)"
             , dm_zftl_is_cache(dev) ? "Cache" : "ZNS"
@@ -1526,20 +1534,52 @@ int dm_zftl_reset_zone(struct zoned_dev * dev, struct zone_info *zone)
 }
 
 void dm_zftl_zone_close(struct zoned_dev * dev, unsigned int zone_id){
-    struct zone_link_entry *zone_link = kzalloc(sizeof(struct  zone_link_entry), GFP_KERNEL);
+    struct zone_link_entry zone_link;
     int ret;
-    zone_link->id = zone_id;
-    list_add(&zone_link->link, &dev->zoned_metadata->full_zoned);
+    zone_link.id = zone_id;
     dev->zoned_metadata->opened_zoned = NULL;
     atomic_inc(&dev->zoned_metadata->nr_full_zone);
 
     if(dm_zftl_is_cache(dev)){
-        ret = kfifo_in(&dev->write_fifo, zone_link, sizeof(struct zone_link_entry));
+        ret = kfifo_in(&dev->write_fifo, &zone_link, sizeof(struct zone_link_entry));
         if (!ret) {
             printk(KERN_ERR "[ZONE CLOSE]: fifo is full\n");
         }
+    }else{
+        struct zone_link_entry *z_link = kvmalloc(sizeof(struct  zone_link_entry), GFP_KERNEL);
+        *z_link = zone_link;
+        list_add(&z_link->link, &dev->zoned_metadata->full_zoned);
     }
 }
+
+
+//void dm_zftl_correct_predict_ppn(unsigned long error, void * context){
+//    struct iorq_dispatch_work * iorq_work = kvmalloc(sizeof(struct iorq_dispatch_work), GFP_KERNEL);
+//    struct dm_zftl_read_io * read_io =(struct dm_zftl_read_io *) context;
+//    struct bio * bio = read_io->bio;
+//    struct dm_zftl_target * dm_zftl = read_io->dm_zftl;
+//    struct dm_io_region * where = kvmalloc(sizeof(struct dm_io_region), GFP_KERNEL | __GFP_ZERO);
+//    struct zoned_dev * dev = dm_zftl_get_ppa_dev(dm_zftl, dmz_blk2sect(read_io->ppn));
+//    where->bdev = dev->bdev;
+//    where->sector = dm_zftl_get_dev_addr(dm_zftl, dmz_blk2sect(read_io->ppn));
+//    where->count = dmz_blk2sect(1);
+//
+//    struct dm_io_request * iorq = kvmalloc(sizeof(struct iorq_dispatch_work), GFP_KERNEL);
+//    iorq->bi_op = REQ_OP_READ;
+//    iorq->bi_op_flags = 0;
+//    iorq->mem.type = DM_IO_BIO;
+//    iorq->mem.ptr.bio = read_io->bio;
+//    iorq->notify.fn = dm_zftl_dm_io_read_cb;
+//    iorq->notify.context = read_io;
+//    iorq->client = dm_zftl->io_client;
+//
+//    iorq_work->iorq = iorq;
+//    iorq_work->where = where;
+//    iorq_work->num = 1;
+//
+//    INIT_WORK(&iorq_work->work, dm_zftl_iorq_dispatch);
+//    queue_work(dm_zftl->iorq_dispatch_wq, &iorq_work->work);
+//}
 
 static int __init dm_zftl_init(void)
 {

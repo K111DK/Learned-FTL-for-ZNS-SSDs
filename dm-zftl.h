@@ -39,8 +39,8 @@
 #include <linux/kernel.h>
 #include <linux/gcd.h>
 #include <linux/compiler.h>
-
-#define DM_ZFTL_L2P_PIN (0)
+#include <linux/jiffies.h>
+#define DM_ZFTL_L2P_PIN (1)
 #define DM_ZFTL_COMPACT_ENABLE 1
 #define DM_ZFTL_COMPACT_INTERVAL 1000000 //50 * 4MB = 200MB
 #define DM_ZFTL_FOREGROUND_RECLAIM_IO_BLOCK_THESHOLD 2
@@ -49,10 +49,10 @@
 #define KB 2 /* in sectors */
 #define MB 1024 * KB
 #define GB 1024 * MB
-#define DM_ZFTL_FIFO_LOG_SIZE 5 * GB
+#define DM_ZFTL_FIFO_LOG_SIZE 2 * GB
 #define DM_ZFTL_ZNS_GC_ENABLE 0
 #define DM_ZFTL_PIN_DEBUG 0
-#define DM_ZFTL_USING_LEA_FTL 1
+#define DM_ZFTL_USING_LEA_FTL 0
 #define DM_ZFTL_USING_MIX 0
 #define DM_ZFTL_VMA_COPY_TEST 0
 #define DM_ZFTL_RECLAIM_ENABLE 1
@@ -251,6 +251,12 @@ struct iorq_dispatch_work {
 };
 
 struct dm_zftl_target {
+    unsigned long max_compact_usec;
+    unsigned long min_compact_usec;
+    atomic_t l2p_cache_hit;
+    atomic_t l2p_cache_miss;
+    atomic_t l2p_swap_in_cnt;
+    atomic_t l2p_swap_out_cnt;
 
     void * dummy_l2p_buffer;
 
@@ -371,6 +377,7 @@ void dm_zftl_copy_read_cb(unsigned long error, void * context);
 int dm_zftl_update_mapping_cache(struct dm_zftl_mapping_table * mapping_table, sector_t lba, sector_t ppa, sector_t nr_blocks);
 void dm_zftl_iorq_dispatch(struct work_struct * work);
 void dm_zftl_construct_wb_page_list(struct copy_buffer * copy_buffer);
+void dm_zftl_dummy_write_cb(unsigned long error, void * context);
 struct copy_job {
     struct kfifo * fifo;
     struct copy_buffer * copy_buffer;
@@ -518,8 +525,10 @@ struct l2p_pin_work{
     atomic_t deferred_cnt;
     int deferred_count;
     int pinned_count;
-    TAILQ_HEAD(_pinned_list, frame_no_node) _pinned_list;
-    TAILQ_HEAD(_deferred_pin_list, frame_no_node) _deferred_pin_list;
+    unsigned int *pinned_array;
+    unsigned int *deferred_array;
+    unsigned int nr_pinned;
+    unsigned int nr_deferred;
 };
 enum {
     READY,// this frame is in DRAM

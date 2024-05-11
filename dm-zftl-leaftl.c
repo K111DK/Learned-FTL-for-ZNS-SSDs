@@ -5,7 +5,6 @@ extern "C" {
 #define MAX_PROMOTE_LAYER 10
 #define MAX_COMPACT_LAYER 100
 
-
 static struct segment * list_tail(struct segment * list){
     if(!list)
         return NULL;
@@ -74,6 +73,12 @@ struct lsm_tree * lsm_tree_init(unsigned int total_blocks){
     }
     atomic_set(&tree->nr_total_query, 0);
     atomic_set(&tree->nr_mispredict, 0);
+
+    atomic_set(&tree->nr_one_byte_bad_slope, 0);
+    atomic_set(&tree->nr_slope, 0);
+    atomic_set(&tree->slope_overflow, 0);
+
+    //y = k * (LPN - LPN_START) + PPN_SART
 
     return tree;
 }
@@ -626,6 +631,7 @@ void lsm_tree_update_seq(struct lsm_tree * lsm_tree, unsigned int start_lpn, int
     for(i = start_lpn; i < start_lpn + len; ++i){
         unsigned int curr_frame = (i) / DM_ZFTL_FRAME_LENGTH;
         if(curr_frame != pre_frame) {
+            atomic_inc(&lsm_tree->nr_slope);
             segs = MALLOC(sizeof (struct segment));
             segs->CRB = NULL;
             segs->next = NULL;
@@ -643,6 +649,7 @@ void lsm_tree_update_seq(struct lsm_tree * lsm_tree, unsigned int start_lpn, int
             pre_frame = curr_frame;
         }
     }
+    atomic_inc(&lsm_tree->nr_slope);
     segs = MALLOC(sizeof (struct segment));
     segs->is_seq_seg = 1;
     segs->is_acc_seg = 1;
@@ -669,7 +676,7 @@ void lsm_tree_update_by_lpn_array(struct lsm_tree * lsm_tree, unsigned int * lpn
     for(i = 0; i < len; ++i){
         unsigned int curr_frame = lpn_array[i] / DM_ZFTL_FRAME_LENGTH;
         if(curr_frame != pre_frame) {
-            segs = Regression(lpn_array + pre_index, i - pre_index, wp);
+            segs = Regression(lsm_tree, lpn_array + pre_index, i - pre_index, wp);
             lsm_tree_insert(segs,
                             lsm_tree);
             wp += i - pre_index;
@@ -677,14 +684,14 @@ void lsm_tree_update_by_lpn_array(struct lsm_tree * lsm_tree, unsigned int * lpn
             pre_frame = curr_frame;
         }
     }
-    segs = Regression(lpn_array + pre_index, i - pre_index, wp);
+    segs = Regression(lsm_tree, lpn_array + pre_index, i - pre_index, wp);
     lsm_tree_insert(segs,
                     lsm_tree);
     return;
 }
 
-struct segment * Regression(unsigned int * lpn_array, int len, unsigned int start_ppn){
-    return greedy_piecewise_linear_regression__(lpn_array, len, start_ppn);
+struct segment * Regression(struct lsm_tree* lsm_tree, unsigned int * lpn_array, int len, unsigned int start_ppn){
+    return greedy_piecewise_linear_regression__(lsm_tree, lpn_array, len, start_ppn);
 }
 
 
@@ -1105,7 +1112,7 @@ unsigned int lsm_tree_get_seg_size__(struct segment * seg){
 
     //lpn size
     if(!seg->is_seq_seg){
-        if(seg->CRB->buffer_len > 2)
+        if(seg->CRB->buffer_len > 2 && !seg->is_acc_seg)
             total_size += seg->CRB->buffer_len * SIZE_FRAME_LPN_OFFSET_BYTES;
     }
 #endif
@@ -1134,7 +1141,7 @@ int frac_is_larger(frac_fp x1, frac_fp x2) {
     return a > b ? 1 : 0;
 }
 
-struct segment * greedy_piecewise_linear_regression__(const unsigned int * lpn_array, int len, unsigned int start_ppn) {
+struct segment * greedy_piecewise_linear_regression__(struct lsm_tree * lsm_tree, const unsigned int * lpn_array, int len, unsigned int start_ppn) {
     enum {
         STATE_FIRST,
         STATE_SECOND,
@@ -1186,7 +1193,7 @@ struct segment * greedy_piecewise_linear_regression__(const unsigned int * lpn_a
 
                     interception.numerator = s0.y - s0.x;
                     interception.denominator = 1;
-
+                    atomic_inc(&lsm_tree->nr_slope);
                     list_tail_add(seg_list,
                                   gen_segment(lpn_array, start_idx,
                                               1, k, interception, start_ppn + start_idx));
@@ -1234,6 +1241,8 @@ struct segment * greedy_piecewise_linear_regression__(const unsigned int * lpn_a
 
 //                    k.numerator = tail_mid_point.y - cone_apex.y;
 //                    k.denominator = tail_mhugeid_point.x - cone_apex.x;
+                    if(lower_rho.numerator > lower_rho.denominator)
+                        atomic_inc(&lsm_tree->slope_overflow);
 
                     k.numerator = upper_rho.numerator * lower_rho.denominator + lower_rho.numerator * upper_rho.denominator;
                     k.denominator = upper_rho.denominator * lower_rho.denominator * 2;
@@ -1256,7 +1265,7 @@ struct segment * greedy_piecewise_linear_regression__(const unsigned int * lpn_a
                     interception.denominator = interception.denominator / div;
                     interception.numerator = interception.numerator / div;
 
-
+                    atomic_inc(&lsm_tree->nr_slope);
                     list_tail_add(seg_list,
                     gen_segment(lpn_array, start_idx, idx - start_idx, k, interception, start_ppn + start_idx));
                     state = STATE_FIRST;
@@ -1291,7 +1300,7 @@ struct segment * greedy_piecewise_linear_regression__(const unsigned int * lpn_a
 
             interception.numerator = s0.y - s0.x;
             interception.denominator = 1;
-
+            atomic_inc(&lsm_tree->nr_slope);
             list_tail_add(seg_list,
                           gen_segment(lpn_array, start_idx,
                                       1, k, interception, start_ppn + start_idx));
@@ -1300,13 +1309,15 @@ struct segment * greedy_piecewise_linear_regression__(const unsigned int * lpn_a
 
             tail_mid_point.x = ( upper_point__.x + lower_point__.x )/ 2;
             tail_mid_point.y = ( upper_point__.y + lower_point__.y )/ 2;
-
+            if(lower_rho.numerator > lower_rho.denominator)
+                atomic_inc(&lsm_tree->slope_overflow);
             k.numerator = upper_rho.numerator * lower_rho.denominator + lower_rho.numerator * upper_rho.denominator;
             k.denominator = upper_rho.denominator * lower_rho.denominator * 2;
 
             interception.numerator =  ((long long)cone_apex.y *
                                        (long long)k.denominator - (long long)k.numerator * (long long)cone_apex.x);
             interception.denominator = k.denominator;
+            atomic_inc(&lsm_tree->nr_slope);
             list_tail_add(seg_list,
                           gen_segment(lpn_array, start_idx, idx - start_idx, k, interception, start_ppn + start_idx));
             break;

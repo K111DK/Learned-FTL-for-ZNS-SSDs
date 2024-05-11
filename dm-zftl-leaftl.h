@@ -11,8 +11,8 @@
 #define seg_end(seg) (seg->start_lpn + seg->len)
 #define seg_start(seg) (seg->start_lpn)
 #define DM_ZFTL_LEA_ORIGIN 1
-#define ERROR_BOUND 4
-#define DM_ZFTL_COMPACT_WITH_PROMOTE 1
+#define ERROR_BOUND 16
+#define DM_ZFTL_COMPACT_WITH_PROMOTE 0
 #define DM_ZFTL_DIV_ROUND_UP(n,d) (((n) + (d) - 1) / (d))
 #define ASSETR_UINT_EQ(eq1, eq2, test_name)     do {if(eq1 != eq2) \
                                                         printk("Test %s error: Expected:%u Got:%u\n", test_name, eq1, eq2); \
@@ -133,6 +133,11 @@ struct lsm_tree_frame{
 };
 
 struct lsm_tree{
+    atomic_t nr_one_byte_bad_slope;
+    atomic_t slope_overflow;
+    atomic_t nr_slope;
+
+
     atomic_t nr_total_query;
     atomic_t nr_mispredict;
     atomic_t look_up_hist[DM_ZFTL_LOOK_UP_HIST_LEN];
@@ -202,14 +207,14 @@ int lsm_tree_CRB_search_lpn_(struct conflict_resolution_buffer * CRB,
 void lsm_tree_update_seq(struct lsm_tree * lsm_tree, unsigned int start_lpn, int len, unsigned int start_ppn);
 void lsm_tree_update_by_lpn_array(struct lsm_tree * lsm_tree, unsigned int * lpn_array, int len, unsigned int start_ppn);
 
-struct segment * Regression(unsigned int * lpn_array, int len, unsigned int start_ppn);
+struct segment * Regression(struct lsm_tree * lsm_tree, unsigned int * lpn_array, int len, unsigned int start_ppn);
 void lsm_tree_level_wise_compact__(struct lsm_tree_level * upper_level, struct lsm_tree_level * lower_level);
 
 int segment_acc_check(const unsigned int * lpn_array, int start_idx, int len, struct segment * seg,unsigned int start_ppn);
 int segment_seq_check(const unsigned int * lpn_array, int start_idx, int len);
 
 #if DM_ZFTL_FP_EMU
-struct segment * greedy_piecewise_linear_regression__(const unsigned int * lpn_array, int len, unsigned int start_ppn);
+struct segment * greedy_piecewise_linear_regression__(struct lsm_tree * lsm_tree, const unsigned int * lpn_array, int len, unsigned int start_ppn);
 struct segment * gen_segment(const unsigned int * lpn_array, int start_idx, int len, frac_fp k, frac_fp interception, unsigned int start_ppn);
 struct segment * gen_segment_original__(const unsigned int * lpn_array, int start_idx, int len, frac_fp k, frac_fp interception, unsigned int start_ppn);
 #else

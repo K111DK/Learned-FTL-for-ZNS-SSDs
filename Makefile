@@ -4,12 +4,12 @@ dm-zftl-y += dm-zftl-leaftl.o
 
 .PHONY: all
 all:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+	make -w -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
 .PHONY: debug
 debug:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+	make -w -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
 .PHONY: clean
 clean:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+	make -w -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
 
 

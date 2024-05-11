@@ -31,7 +31,7 @@ struct {								\
 
 #define	TAILQ_FOREACH(var, head, field)					\
 	for ((var) = TAILQ_FIRST((head));				\
-	    (var);							\
+	    (var) ;							\
 	    (var) = TAILQ_NEXT((var), field))
 
 #define	TAILQ_FOREACH_REVERSE(var, head, headname, field)		\

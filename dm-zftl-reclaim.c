@@ -299,9 +299,12 @@ void dm_zftl_reclaim_read_cb(unsigned long error, void * context){
     //kick-off pin work
     copy_job->pin_cb_fn = dm_zftl_queue_writeback;
     copy_job->pin_cb_ctx = (void *)copy_job;
+
+
     struct io_job * io_job = kvmalloc(sizeof(struct io_job), GFP_KERNEL);
     io_job->cp_job = copy_job;
     io_job->flags = CP_JOB;
+
     struct try_l2p_pin * try_pin = kvmalloc(sizeof(struct try_l2p_pin), GFP_KERNEL);
     try_pin->dm_zftl = dm_zftl;
     try_pin->io_job = io_job;
@@ -390,6 +393,12 @@ void dm_zftl_valid_data_writeback(struct work_struct *work){
     sector_t nr_sectors = dmz_blk2sect(copy_job->copy_buffer->nr_valid_blocks);
     struct dm_io_region where;
     unsigned long flags;
+
+    /* We can only have one outstanding write at a time */
+    while(test_and_set_bit_lock(DMZAP_WR_OUTSTANDING,
+                                &dm_zftl->zone_device->write_bitmap))
+        io_schedule();
+
     spin_lock_irqsave(&copy_job->dm_zftl->wp_lock_, flags);
     sector_t start_ppa = dm_zftl_get_seq_wp(wb_dev, nr_sectors);
     copy_job->writeback_to->zoned_metadata->opened_zoned->wp += nr_sectors;
@@ -410,10 +419,7 @@ void dm_zftl_valid_data_writeback(struct work_struct *work){
 
 
 
-    /* We can only have one outstanding write at a time */
-    while(test_and_set_bit_lock(DMZAP_WR_OUTSTANDING,
-                                &dm_zftl->zone_device->write_bitmap))
-        io_schedule();
+
 
     if(start_ppa == DM_ZFTL_UNMAPPED_PPA){
         printk(KERN_EMERG "[Reclaim] Fatal: no free space for wriite back valid data");
@@ -486,10 +492,10 @@ void dm_zftl_valid_data_writeback_cb(unsigned long error, void * context){
 
 #if DM_ZFTL_L2P_PIN
     dm_zftl_unpin(copy_job->pin_work_ctx);
-#endif
-
+#else
     kvfree(copy_job->copy_buffer);
     kvfree(copy_job);
+#endif
 }
 
 unsigned int dm_zftl_get_victim_greedy(struct zoned_dev * dev, struct dm_zftl_mapping_table * mapping_table){
@@ -517,6 +523,7 @@ unsigned int dm_zftl_get_victim_greedy(struct zoned_dev * dev, struct dm_zftl_ma
     if(found){
         list_del(&selected_zone_link->link);
         atomic_dec(&dev->zoned_metadata->nr_full_zone);
+        kvfree(zone_link);
     }
 
     return victim_id;
@@ -526,7 +533,6 @@ unsigned int dm_zftl_get_reclaim_zone(struct zoned_dev * dev, struct dm_zftl_map
     int ret;
     unsigned int reclaim_zone_id = 0;
     if(dm_zftl_is_cache(dev)){
-
         struct zone_link_entry reclaim_zone;
         reclaim_zone_id = 0;
         int ret;
@@ -535,17 +541,12 @@ unsigned int dm_zftl_get_reclaim_zone(struct zoned_dev * dev, struct dm_zftl_map
             reclaim_zone_id = 0;
             return 0;
         }
-
         reclaim_zone_id = reclaim_zone.id;
         atomic_dec(&dev->zoned_metadata->nr_full_zone);
-
-
     }else{
-
         reclaim_zone_id = dm_zftl_get_victim_greedy(dev, mappping_table);
         if(reclaim_zone_id)
             return reclaim_zone_id;
-
     }
 
 #if DM_ZFTL_RECLAIM_DEBUG
